@@ -13,6 +13,8 @@ O projeto adota os princípios de **Clean Architecture**, **Domain-Driven Design
 ```text
 s5/
 ├── README.md                   # Documentação do componente
+├── app.py                      # Ponto de entrada da API (uvicorn app:app)
+├── seed.py                     # Dados de exemplo para testar a API
 ├── requirements.txt            # Dependências (pytest, duckdb, fastapi, uvicorn, httpx)
 ├── pytest.ini                  # Configuração dos testes (pythonpath = .)
 ├── src/
@@ -173,23 +175,18 @@ Os testes unitários usam fakes em memória ([`tests/unit/application/fakes.py`]
 
 ### Subindo a API
 
-O módulo expõe o router, mas ainda **não tem um ponto de entrada (`main.py`)**. Para servir a API localmente:
-
-```python
-# app.py
-from fastapi import FastAPI
-
-from src.infrastructure.database.duckdb_time_series_repository import DuckDBTimeSeriesRepository
-from src.presentation.http.metrics_query_controller import create_metrics_query_router
-
-repository = DuckDBTimeSeriesRepository("s5_metrics.db")  # ou ":memory:"
-app = FastAPI(title="S5 — Métricas e Séries Temporais")
-app.include_router(create_metrics_query_router(repository))
-```
+O ponto de entrada é [`app.py`](app.py), que monta o router sobre um `DuckDBTimeSeriesRepository`. O banco padrão é `s5_metrics.db`; para usar outro caminho (ou `:memory:`), defina `S5_DATABASE_PATH`.
 
 ```bash
 uvicorn app:app --reload
 # http://localhost:8000/docs
+```
+
+O banco começa vazio e a API é somente leitura. Para ter dados de exemplo (`zona-1` e `grid-1` em 2026-10-09), rode antes `python seed.py` e consulte:
+
+```bash
+curl "http://localhost:8000/api/v5/metrics/zona-1?start_time=2026-10-09T00:00:00&end_time=2026-10-09T23:59:59"
+curl "http://localhost:8000/api/v5/heatmaps/grid-1?start_time=2026-10-09T00:00:00&end_time=2026-10-09T23:59:59"
 ```
 
 ---
