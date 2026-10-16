@@ -3,7 +3,16 @@ from datetime import datetime
 from src.application.state.metrics_buffer import MetricsBuffer
 from src.application.use_cases.ingest_envelope_use_case import IngestEnvelopeUseCase
 from src.domain.services.message_deduplicator import MessageDeduplicator
-from tests.fixtures.spec_examples import qualified_event, zone_occupancy, zone_transition_exit
+from tests.fixtures.spec_examples import (
+    REPLAY_SESSION_ID,
+    SESSION_ID,
+    in_session,
+    qualified_event,
+    replay_session_started,
+    replay_state,
+    zone_occupancy,
+    zone_transition_exit,
+)
 
 
 def _buffer() -> MetricsBuffer:
@@ -28,3 +37,57 @@ def test_deve_descartar_antigos_mas_manter_ultima_amostra_e_evento_aberto():
     assert buffer.transitions == []
     assert [s.zone_id for s in buffer.samples] == ["vaga-12"]
     assert len(buffer.events) == 1
+
+
+def _ingest():
+    return IngestEnvelopeUseCase(MessageDeduplicator())
+
+
+def test_deve_adotar_como_live_a_sessao_de_mensagem_que_chega_antes_do_anuncio():
+    buffer = _buffer()
+    assert buffer.session.session_id == SESSION_ID
+    assert buffer.session.mode == "LIVE"
+    assert buffer.session.started_at == datetime(2026, 9, 23, 14, 29, 59, 200000)
+    assert buffer.session.watermark == datetime(2026, 9, 23, 14, 30)
+
+
+def test_anuncio_da_sessao_ja_adotada_completa_modo_e_inicio_sem_descartar_dados():
+    ingest = _ingest()
+    buffer = MetricsBuffer()
+    buffer.add(ingest.execute(in_session(zone_transition_exit(), REPLAY_SESSION_ID, "m-1")))
+
+    buffer.add(ingest.execute(replay_session_started()))
+
+    assert buffer.session.mode == "REPLAY"
+    assert buffer.session.started_at == datetime(2026, 9, 23, 14, 29, 58)
+    assert len(buffer.transitions) == 1
+
+
+def test_nova_sessao_descarta_o_estado_da_anterior_e_ignora_mensagens_atrasadas_dela():
+    ingest = _ingest()
+    buffer = _buffer()
+
+    buffer.add(ingest.execute(replay_session_started()))
+    late = ingest.execute(in_session(zone_occupancy(), SESSION_ID, "m-atrasada"))
+
+    assert buffer.add(late) is False
+    assert buffer.transitions == [] and buffer.samples == [] and buffer.events == []
+    assert buffer.session.session_id == REPLAY_SESSION_ID
+    assert SESSION_ID in buffer.ended_sessions
+
+
+def test_deve_marcar_previous_session_id_como_encerrada():
+    buffer = MetricsBuffer()
+    buffer.add(_ingest().execute(replay_session_started()))
+    assert "1a2b3c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d" in buffer.ended_sessions
+
+
+def test_replay_state_avanca_o_watermark_sem_guardar_mensagem():
+    ingest = _ingest()
+    buffer = MetricsBuffer()
+    buffer.add(ingest.execute(replay_session_started()))
+
+    buffer.add(ingest.execute(replay_state()))
+
+    assert buffer.session.watermark == datetime(2026, 9, 23, 14, 29, 59)
+    assert buffer.transitions == [] and buffer.samples == []

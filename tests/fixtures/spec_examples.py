@@ -79,6 +79,48 @@ _QUALIFIED_EVENT = {
     },
 }
 
+REPLAY_SESSION_ID = "4b5c6d7e-8f90-4a1b-9c2d-3e4f5a6b7c8d"
+
+_REPLAY_SESSION_STARTED = {
+    "message_type": "event",
+    "message_id": "4e5f6071-8293-4d0e-9f1a-3b4c5d6e7f80",
+    "schema": "ods.session.started",
+    "schema_version": "1.0",
+    "producer": "P6",
+    "published_at": "2026-10-16T13:00:00.020Z",
+    "captured_at": "2026-09-23T14:29:58.000Z",
+    "session_id": REPLAY_SESSION_ID,
+    "sequence": 0,
+    "payload": {
+        "mode": "REPLAY",
+        "started_at": "2026-09-23T14:29:58.000Z",
+        "sources": ["cam0", "mic0"],
+        "recording_id": "rec-2026-09-23-001",
+        "previous_session_id": "1a2b3c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d",
+        "reason": "SEEK",
+    },
+}
+
+_REPLAY_STATE = {
+    "message_type": "event",
+    "message_id": "5f607182-93a4-4e1f-8a2b-4c5d6e7f8091",
+    "schema": "ods.p6.replay.state",
+    "schema_version": "1.0",
+    "producer": "P6",
+    "published_at": "2026-10-16T13:00:01.010Z",
+    "captured_at": "2026-09-23T14:29:59.000Z",
+    "session_id": REPLAY_SESSION_ID,
+    "sequence": 1,
+    "payload": {
+        "recording_id": "rec-2026-09-23-001",
+        "state": "PLAYING",
+        "position_ms": 126000,
+        "duration_ms": 600000,
+        "speed_factor": 1.0,
+        "loop": False,
+    },
+}
+
 
 def zone_transition_exit() -> dict:
     return copy.deepcopy(_ZONE_TRANSITION_EXIT)
@@ -90,3 +132,21 @@ def zone_occupancy() -> dict:
 
 def qualified_event() -> dict:
     return copy.deepcopy(_QUALIFIED_EVENT)
+
+
+def replay_session_started() -> dict:
+    return copy.deepcopy(_REPLAY_SESSION_STARTED)
+
+
+def replay_state() -> dict:
+    return copy.deepcopy(_REPLAY_STATE)
+
+
+def in_session(message: dict, session_id: str, message_id: str, captured_at: str | None = None) -> dict:
+    """A mesma mensagem em outra sessão (e, se pedido, em outro instante), com message_id
+    novo para não cair na deduplicação."""
+    message["session_id"] = session_id
+    message["message_id"] = message_id
+    if captured_at is not None:
+        message["captured_at"] = captured_at
+    return message

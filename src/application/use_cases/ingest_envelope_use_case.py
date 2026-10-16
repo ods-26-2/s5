@@ -4,10 +4,13 @@ from dataclasses import dataclass
 from src.application.parsers.envelope_parser import (
     EV_SERVICO_FIELDS,
     EV_SINAL_FIELDS,
+    EV_SINAL_SESSION_FIELDS,
     parse_envelope,
     parse_utc_timestamp,
 )
 from src.domain.entities.qualified_event import QualifiedEvent
+from src.domain.entities.replay_state import ReplayState
+from src.domain.entities.session_start import SessionStart
 from src.domain.entities.zone_occupancy_sample import ZoneOccupancySample
 from src.domain.entities.zone_transition import ZoneTransition
 from src.domain.exceptions import (
@@ -22,9 +25,11 @@ from src.domain.value_objects.envelope import Envelope
 ZONE_TRANSITION_SCHEMA = "ods.s1.zone_transition"
 ZONE_OCCUPANCY_SCHEMA = "ods.s1.zone_occupancy"
 QUALIFIED_EVENT_SCHEMA = "ods.s2.event"
+SESSION_STARTED_SCHEMA = "ods.session.started"
+REPLAY_STATE_SCHEMA = "ods.p6.replay.state"
 SUPPORTED_MAJOR_VERSION = 1
 
-DomainMessage = ZoneTransition | ZoneOccupancySample | QualifiedEvent
+DomainMessage = ZoneTransition | ZoneOccupancySample | QualifiedEvent | SessionStart | ReplayState
 
 
 @dataclass(frozen=True)
@@ -50,11 +55,15 @@ class IngestEnvelopeUseCase:
             ZONE_TRANSITION_SCHEMA: self._parse_zone_transition,
             ZONE_OCCUPANCY_SCHEMA: self._parse_zone_occupancy,
             QUALIFIED_EVENT_SCHEMA: self._parse_qualified_event,
+            SESSION_STARTED_SCHEMA: self._parse_session_started,
+            REPLAY_STATE_SCHEMA: self._parse_replay_state,
         }
         self._profile_fields = {
             ZONE_TRANSITION_SCHEMA: EV_SINAL_FIELDS,
             ZONE_OCCUPANCY_SCHEMA: EV_SINAL_FIELDS,
             QUALIFIED_EVENT_SCHEMA: EV_SERVICO_FIELDS,
+            SESSION_STARTED_SCHEMA: EV_SINAL_SESSION_FIELDS,
+            REPLAY_STATE_SCHEMA: EV_SINAL_SESSION_FIELDS,
         }
 
     @property
@@ -130,4 +139,34 @@ class IngestEnvelopeUseCase:
             session_id=envelope.session_id,
             zone_id=payload.get("zone_id"),
             object_class=payload.get("class"),
+        )
+
+    @staticmethod
+    def _parse_session_started(envelope: Envelope) -> SessionStart:
+        payload = envelope.payload
+        sources = payload["sources"]
+        if not isinstance(sources, list) or not all(isinstance(item, str) for item in sources):
+            raise TypeError("sources deve ser uma lista de strings.")
+        return SessionStart(
+            session_id=envelope.session_id,
+            mode=payload["mode"],
+            started_at=parse_utc_timestamp(payload["started_at"], "started_at"),
+            sources=tuple(sources),
+            recording_id=payload.get("recording_id"),
+            previous_session_id=payload.get("previous_session_id"),
+            reason=payload.get("reason"),
+        )
+
+    @staticmethod
+    def _parse_replay_state(envelope: Envelope) -> ReplayState:
+        payload = envelope.payload
+        return ReplayState(
+            session_id=envelope.session_id,
+            captured_at=envelope.captured_at,
+            recording_id=payload["recording_id"],
+            state=payload["state"],
+            position_ms=payload["position_ms"],
+            duration_ms=payload["duration_ms"],
+            speed_factor=payload["speed_factor"],
+            loop=payload["loop"],
         )

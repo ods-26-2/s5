@@ -100,3 +100,49 @@ def test_deve_persistir_e_consultar_metrica_por_tipo_de_evento_no_duckdb():
     assert result[0].uncertain_count == 1
     assert result[0].zone_id == "galpao-solda"
     assert result[0].duration_avg_ms == 12400
+
+
+def test_consulta_padrao_le_so_live_para_que_replay_nao_duplique_o_historico():
+    repository = DuckDBTimeSeriesRepository(":memory:")
+    base_time = datetime(2026, 9, 23, 14, 0, 0)
+    window = TimeWindow(start_time=base_time, end_time=base_time + timedelta(minutes=1))
+    live = OccupancyMetric(zone_id="vaga-12", window=window, dwell_time_avg=1.0, occupancy_peak=1, total_count=1)
+    replay = OccupancyMetric(zone_id="vaga-12", window=window, dwell_time_avg=2.0, occupancy_peak=1, total_count=5)
+    repository.save_occupancy_metric(live, "1m", mode="LIVE", session_id="s-live")
+    repository.save_occupancy_metric(replay, "1m", mode="REPLAY", session_id="s-replay")
+    period = TimeWindow(start_time=base_time, end_time=base_time + timedelta(hours=1))
+
+    assert [m.total_count for m in repository.query_metrics("vaga-12", period, "1m")] == [1]
+    assert [m.total_count for m in repository.query_metrics("vaga-12", period, "1m", mode="REPLAY")] == [5]
+
+
+def test_metricas_de_evento_em_replay_ficam_fora_da_consulta_padrao():
+    repository = DuckDBTimeSeriesRepository(":memory:")
+    base_time = datetime(2026, 9, 23, 14, 0, 0)
+    window = TimeWindow(start_time=base_time, end_time=base_time + timedelta(hours=1))
+    metric = EventMetric(event_type="PPE_NON_COMPLIANT", window=window, count=1, uncertain_count=0)
+    repository.save_event_metric(metric, "1h", mode="REPLAY", session_id="s-replay")
+
+    assert repository.query_event_metrics("PPE_NON_COMPLIANT", window, "1h") == []
+    assert len(repository.query_event_metrics("PPE_NON_COMPLIANT", window, "1h", mode="REPLAY")) == 1
+
+
+def test_deve_acrescentar_mode_e_session_id_em_event_metrics_criada_sem_elas(tmp_path):
+    database_path = str(tmp_path / "passo3.db")
+    legacy = duckdb.connect(database_path)
+    legacy.execute(
+        "CREATE TABLE event_metrics (event_type VARCHAR, zone_id VARCHAR, object_class VARCHAR,"
+        " granularity VARCHAR, start_time TIMESTAMP, end_time TIMESTAMP, count INTEGER,"
+        " uncertain_count INTEGER, duration_avg_ms INTEGER)"
+    )
+    base_time = datetime(2026, 9, 23, 14, 0, 0)
+    legacy.execute(
+        "INSERT INTO event_metrics VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        ["X", None, None, "1h", base_time, base_time + timedelta(hours=1), 2, 0, None],
+    )
+    legacy.close()
+
+    repository = DuckDBTimeSeriesRepository(database_path)
+    window = TimeWindow(start_time=base_time, end_time=base_time + timedelta(hours=1))
+
+    assert [m.count for m in repository.query_event_metrics("X", window, "1h")] == [2]

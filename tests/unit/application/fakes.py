@@ -3,6 +3,7 @@ from datetime import datetime
 from src.domain.entities.event_metric import EventMetric
 from src.domain.entities.heatmap_grid import HeatmapGrid
 from src.domain.entities.occupancy_metric import OccupancyMetric
+from src.domain.entities.session_start import LIVE
 from src.domain.repositories.i_time_series_repository import ITimeSeriesRepository
 from src.domain.value_objects.time_window import TimeWindow
 
@@ -12,21 +13,27 @@ class FakeTimeSeriesRepository(ITimeSeriesRepository):
 
     def __init__(self) -> None:
         self.saved_metrics: list[tuple[OccupancyMetric, str]] = []
+        self.saved_modes: list[tuple[str, str | None]] = []
         self.saved_heatmaps: list[tuple[HeatmapGrid, datetime]] = []
         self.saved_event_metrics: list[tuple[EventMetric, str]] = []
         self.metrics_to_return: list[OccupancyMetric] = []
 
-    def save_occupancy_metric(self, metric: OccupancyMetric, granularity: str) -> None:
+    def save_occupancy_metric(
+        self, metric: OccupancyMetric, granularity: str, mode: str = LIVE, session_id: str | None = None
+    ) -> None:
         self.saved_metrics.append((metric, granularity))
+        self.saved_modes.append((mode, session_id))
 
-    def save_event_metric(self, metric: EventMetric, granularity: str) -> None:
+    def save_event_metric(
+        self, metric: EventMetric, granularity: str, mode: str = LIVE, session_id: str | None = None
+    ) -> None:
         self.saved_event_metrics.append((metric, granularity))
 
     def save_heatmap_grid(self, grid: HeatmapGrid, timestamp: datetime) -> None:
         self.saved_heatmaps.append((grid, timestamp))
 
     def query_metrics(
-        self, zone_id: str, window: TimeWindow, granularity: str
+        self, zone_id: str, window: TimeWindow, granularity: str, mode: str = LIVE
     ) -> list[OccupancyMetric]:
         return self.metrics_to_return
 

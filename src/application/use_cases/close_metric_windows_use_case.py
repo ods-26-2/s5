@@ -8,6 +8,7 @@ from src.application.ports.event_publisher import IEventPublisher
 from src.application.state.metrics_buffer import MetricsBuffer
 from src.domain.entities.event_metric import EventMetric
 from src.domain.entities.occupancy_metric import OccupancyMetric
+from src.domain.entities.session_start import REPLAY
 from src.domain.repositories.i_time_series_repository import ITimeSeriesRepository
 from src.domain.services.aggregation_strategy import AggregationStrategy
 from src.domain.services.event_metrics_aggregation import EventMetricsAggregation
@@ -25,9 +26,13 @@ class CloseMetricWindowsUseCase:
     disparo anterior, persiste as métricas e publica ods.s5.zone_metrics (uma por zona
     conhecida) e ods.s5.event_metrics (uma por tipo de evento com ocorrência).
 
-    Uma janela só fecha `grace_seconds` depois do seu fim, para acolher a latência entre
-    captura e publicação das mensagens de S1 e S2. O primeiro disparo só marca o ponto de
-    partida: as janelas anteriores a ele não teriam dados completos.
+    O relógio depende do modo da sessão corrente: em LIVE é o relógio de parede (`now`);
+    em REPLAY é o watermark de captura da gravação, porque o tempo de captura reproduzido
+    não acompanha a parede e pode até voltar (SEEK, LOOP). Uma janela só fecha
+    `grace_seconds` depois do seu fim, para acolher a latência entre captura e publicação.
+
+    A cada nova sessão o cursor volta ao início dela: as janelas ainda abertas da sessão
+    anterior são abandonadas, como o resto do estado daquela sessão.
     """
 
     def __init__(
@@ -49,22 +54,27 @@ class CloseMetricWindowsUseCase:
         self._envelope_factory = envelope_factory
         self._granularities = granularities
         self._grace = timedelta(seconds=grace_seconds)
+        self._cursor_session_id: str | None = None
         self._closed_until: datetime | None = None
 
     def execute(self, now: datetime) -> list[dict]:
-        until = now - self._grace
-        if self._closed_until is None:
-            self._closed_until = until
+        session = self._buffer.session
+        if session is None:
             return []
-        session_id = self._buffer.current_session_id
-        if session_id is None or until <= self._closed_until:
+        if session.session_id != self._cursor_session_id:
+            self._cursor_session_id = session.session_id
+            self._closed_until = session.started_at
+
+        clock = session.watermark if session.mode == REPLAY else now
+        until = clock - self._grace
+        if until <= self._closed_until:
             return []
 
         published = []
         for granularity in self._granularities:
             for window in closed_windows(granularity, self._closed_until, until):
-                published += self._close_zone_window(granularity, window, session_id)
-                published += self._close_event_window(granularity, window, session_id)
+                published += self._close_zone_window(granularity, window, session.session_id, session.mode)
+                published += self._close_event_window(granularity, window, session.session_id, session.mode)
 
         self._closed_until = until
         longest = max(GRANULARITY_SECONDS[g] for g in self._granularities)
@@ -72,14 +82,16 @@ class CloseMetricWindowsUseCase:
         return published
 
     def _close_zone_window(
-        self, granularity: str, window: TimeWindow, session_id: str
+        self, granularity: str, window: TimeWindow, session_id: str, mode: str
     ) -> list[dict]:
         messages = []
         for zone_id, context in sorted(self._buffer.zones.items()):
             metric = self._zone_aggregation.aggregate(
                 self._buffer.transitions, self._buffer.samples, zone_id, window
             )
-            self._repository.save_occupancy_metric(metric, granularity)
+            self._repository.save_occupancy_metric(
+                metric, granularity, mode=mode, session_id=session_id
+            )
             messages.append(
                 self._publish(
                     ZONE_METRICS_SCHEMA,
@@ -93,11 +105,13 @@ class CloseMetricWindowsUseCase:
         return messages
 
     def _close_event_window(
-        self, granularity: str, window: TimeWindow, session_id: str
+        self, granularity: str, window: TimeWindow, session_id: str, mode: str
     ) -> list[dict]:
         messages = []
         for metric in self._event_aggregation.aggregate(self._buffer.events, window):
-            self._repository.save_event_metric(metric, granularity)
+            self._repository.save_event_metric(
+                metric, granularity, mode=mode, session_id=session_id
+            )
             messages.append(
                 self._publish(
                     EVENT_METRICS_SCHEMA,

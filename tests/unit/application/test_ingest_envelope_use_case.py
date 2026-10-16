@@ -4,6 +4,8 @@ import pytest
 
 from src.application.use_cases.ingest_envelope_use_case import IngestEnvelopeUseCase
 from src.domain.entities.qualified_event import QualifiedEvent
+from src.domain.entities.replay_state import ReplayState
+from src.domain.entities.session_start import SessionStart
 from src.domain.entities.zone_occupancy_sample import ZoneOccupancySample
 from src.domain.entities.zone_transition import ZoneTransition
 from src.domain.exceptions import (
@@ -12,7 +14,13 @@ from src.domain.exceptions import (
     UnsupportedSchemaVersionError,
 )
 from src.domain.services.message_deduplicator import MessageDeduplicator
-from tests.fixtures.spec_examples import qualified_event, zone_occupancy, zone_transition_exit
+from tests.fixtures.spec_examples import (
+    qualified_event,
+    replay_session_started,
+    replay_state,
+    zone_occupancy,
+    zone_transition_exit,
+)
 
 
 def _use_case() -> IngestEnvelopeUseCase:
@@ -117,5 +125,39 @@ def test_deve_aceitar_s2_event_sem_source_id_e_artifact_version():
 def test_deve_rejeitar_s2_event_sem_sequence():
     message = qualified_event()
     del message["sequence"]
+    with pytest.raises(MalformedEventEnvelopeError):
+        _use_case().execute(message)
+
+
+def test_deve_converter_session_started_do_exemplo_da_especificacao():
+    message = _use_case().execute(replay_session_started()).message
+
+    assert isinstance(message, SessionStart)
+    assert message.mode == "REPLAY"
+    assert message.reason == "SEEK"
+    assert message.sources == ("cam0", "mic0")
+    assert message.started_at == datetime(2026, 9, 23, 14, 29, 58)
+    assert message.previous_session_id == "1a2b3c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d"
+
+
+def test_deve_converter_replay_state_do_exemplo_da_especificacao():
+    message = _use_case().execute(replay_state()).message
+
+    assert isinstance(message, ReplayState)
+    assert message.state == "PLAYING"
+    assert message.position_ms == 126000
+    assert message.captured_at == datetime(2026, 9, 23, 14, 29, 59)
+
+
+def test_deve_rejeitar_session_started_com_modo_desconhecido():
+    message = replay_session_started()
+    message["payload"]["mode"] = "SIMULATION"
+    with pytest.raises(MalformedEventEnvelopeError):
+        _use_case().execute(message)
+
+
+def test_deve_rejeitar_session_started_com_sources_que_nao_seja_lista():
+    message = replay_session_started()
+    message["payload"]["sources"] = "cam0"
     with pytest.raises(MalformedEventEnvelopeError):
         _use_case().execute(message)

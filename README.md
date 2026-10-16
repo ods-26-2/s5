@@ -19,7 +19,8 @@ s5/
 ├── pytest.ini                  # Configuração dos testes (pythonpath = .)
 ├── src/
 │   ├── domain/                 # 1. Coração do negócio (zero dependências externas)
-│   │   ├── entities/           # ZoneTransition, ZoneOccupancySample, OccupancyMetric, HeatmapGrid
+│   │   ├── entities/           # ZoneTransition, ZoneOccupancySample, QualifiedEvent, SessionStart,
+│   │   │                       #   ReplayState, OccupancyMetric, EventMetric, HeatmapGrid
 │   │   ├── value_objects/      # Envelope, TimeWindow, WorldCoordinate, PixelCoordinate,
 │   │   │                       #   SpatialCell, HomographyMatrix
 │   │   ├── repositories/       # Contrato ITimeSeriesRepository
@@ -58,7 +59,7 @@ Conforme definido em [`docs/responsability.md`](../docs/responsability.md):
 
 | Submódulo | Funcionalidade | Padrão / Arquitetura | Responsável |
 | :--- | :--- | :--- | :--- |
-| **S5.1 — Ingestor de Eventos B3** | Consumo Pub/Sub do B3, leitura do envelope comum, deduplicação por `message_id` e conversão de `ods.s1.zone_transition`, `ods.s1.zone_occupancy` e `ods.s2.event`. | Event Consumer + Deduplicator | Rafael Castro |
+| **S5.1 — Ingestor de Eventos B3** | Consumo Pub/Sub do B3, leitura do envelope comum, deduplicação por `message_id` e conversão de `ods.s1.zone_transition`, `ods.s1.zone_occupancy`, `ods.s2.event`, `ods.session.started` e `ods.p6.replay.state`; reinício do estado a cada sessão. | Event Consumer + Deduplicator | Rafael Castro |
 | **S5.2 — Motor de Agregação** | Métricas por zona (permanência, pico e média de ocupação, entradas) e por tipo de evento em janelas alinhadas de 1m, 15m, 1h e 1d, publicadas em `ods.s5.zone_metrics` e `ods.s5.event_metrics`. | Time Window Engine + Aggregator Strategy | Rafael Castro |
 | **S5.3 — Gerador de Mapa de Calor** | Projeção de pixels $(u, v)$ no plano de mundo pela homografia I3 ($H \in \mathbb{R}^{3\times 3}$) e cálculo de densidade em grade. | Spatial Coordinate Converter + Grid Density Calculator | Rafael Castro |
 | **S5.4 — Time-Series Store (DuckDB)** | Armazenamento colunar OLAP, worker de rollup (1s → 1m → 15m → 1h) e consultas SQL de séries temporais. | DuckDB Repository + Downsampling Rollup Worker | Rafael Castro |
@@ -68,12 +69,13 @@ Conforme definido em [`docs/responsability.md`](../docs/responsability.md):
 ## 🔄 Fluxo de Dados
 
 ```text
-Barramento B3 (ods.s1.zone_transition, ods.s1.zone_occupancy, ods.s2.event)
+Barramento B3 (ods.s1.zone_transition, ods.s1.zone_occupancy, ods.s2.event,
+              ods.session.started, ods.p6.replay.state)
   └─> subscribe_s5(consumer, handler) — um tópico por schema        (S5.1)
         └─> HandleBusMessageUseCase.execute(message)
               IngestEnvelopeUseCase → Envelope + ZoneTransition | ZoneOccupancySample | QualifiedEvent
               MessageDeduplicator → descarta message_id repetido
-              MetricsBuffer.add → guarda até a janela fechar
+              MetricsBuffer.add → guarda até a janela fechar; nova sessão reinicia o estado
   └─> MetricsWindowWorker.run() → CloseMetricWindowsUseCase.execute(now)  (S5.2)
         closed_windows → janelas alinhadas 1m, 15m, 1h, 1d que fecharam
         ZoneOccupancyAggregationStrategy → OccupancyMetric por zona
@@ -115,14 +117,19 @@ Barramento B3 (ods.s1.zone_transition, ods.s1.zone_occupancy, ods.s2.event)
 ```
 
 **Processamento** (`IngestEnvelopeUseCase`):
-- Schema fora de `ods.s1.zone_transition`, `ods.s1.zone_occupancy` e `ods.s2.event` → `UnsupportedSchemaError`.
-- `parse_envelope` exige os seis campos fixos e os do perfil do schema: EV-SINAL nas mensagens do S1 (`captured_at`, `source_id`, `session_id`, `sequence`, `artifact_version`) e EV-SERVIÇO no `ods.s2.event` (`captured_at`, `session_id`, `sequence`). Marcos de tempo precisam de fuso (`Z`) e são convertidos para UTC sem `tzinfo`, convenção de todo o S5. Campo ausente ou com formato inválido → `MalformedEventEnvelopeError`.
+- Schema fora de `ods.s1.zone_transition`, `ods.s1.zone_occupancy`, `ods.s2.event`, `ods.session.started` e `ods.p6.replay.state` → `UnsupportedSchemaError`.
+- `parse_envelope` exige os seis campos fixos e os do perfil do schema: EV-SINAL nas mensagens do S1 (`captured_at`, `source_id`, `session_id`, `sequence`, `artifact_version`) e EV-SERVIÇO no `ods.s2.event` (`captured_at`, `session_id`, `sequence`). `ods.session.started` e `ods.p6.replay.state` usam EV-SINAL sem `artifact_version`; `source_id` não é exigido neles porque P6 reproduz várias fontes, listadas em `sources`. Marcos de tempo precisam de fuso (`Z`) e são convertidos para UTC sem `tzinfo`, convenção de todo o S5. Campo ausente ou com formato inválido → `MalformedEventEnvelopeError`.
 - `MessageDeduplicator` descarta mensagens cujo `message_id` já foi aceito (regra 7) e retorna `None`. O id só é registrado depois que a mensagem é aceita.
 - `schema_version` com MAJOR diferente de `1` → `UnsupportedSchemaVersionError`; qualquer MINOR do MAJOR 1 é aceito (regra 8).
 
 Não há debounce nem histerese no S5: na 6c, a histerese é do S1, configurada pelo artefato ZONES, e a transição já chega confirmada.
 
 **Saída:** `IngestedMessage` com o envelope e um `ZoneTransition`, `ZoneOccupancySample` ou `QualifiedEvent`, ou `None` quando a mensagem é repetida. `subscribe_s5` assina um tópico por schema; uma mensagem fora do contrato é registrada em log e descartada, sem interromper as seguintes.
+
+**Sessões** (`MetricsBuffer`): a camada 3 reinicia o estado a cada `ods.session.started` (Especificação 1.0, seção 7).
+- Uma sessão nova descarta as transições, amostras e eventos da anterior. Mensagens atrasadas da sessão encerrada, ou da `previous_session_id` anunciada, são ignoradas.
+- Os tópicos são independentes, então mensagens do S1 e do S2 podem chegar antes do anúncio da sessão. Nesse caso a sessão é adotada como `LIVE`, com início no primeiro `captured_at` recebido. O anúncio, quando chega, só completa o modo e o início, sem descartar o que já foi recebido.
+- `ods.p6.replay.state` não vira métrica: ele só faz andar o relógio de captura da sessão de replay.
 
 O `InMemoryB3EventConsumer` implementa os contratos `B3EventConsumer` e `IEventPublisher` sem broker real: o que é publicado é entregue aos handlers do mesmo processo. Ele serve para desenvolvimento e testes e é o ponto de troca por um cliente Pub/Sub de verdade. O contrato espelha o consumidor usado no S4 (C++).
 
@@ -132,8 +139,10 @@ O `InMemoryB3EventConsumer` implementa os contratos `B3EventConsumer` e `IEventP
 
 **Disparo:** `MetricsWindowWorker.run()`, chamado por um agendador externo em intervalo menor que a menor janela (ex.: a cada 5 s). Cada disparo fecha as janelas **alinhadas ao relógio UTC** (14:00–14:15, não t−15m–t) de **1m, 15m, 1h e 1d** que terminaram desde o disparo anterior. Disparos extras não publicam nada. Alguns detalhes:
 - uma janela só fecha 2 s depois do seu fim, para acolher a latência entre captura e publicação;
-- o primeiro disparo só marca o ponto de partida;
-- janelas perdidas entre dois disparos são fechadas todas, em ordem.
+- janelas perdidas entre dois disparos são fechadas todas, em ordem;
+- a cada sessão nova o cursor volta ao início dela, e as janelas ainda abertas da sessão anterior são abandonadas.
+
+**Relógio:** em sessão `LIVE`, o relógio é o de parede. Em `REPLAY`, é o maior `captured_at` recebido na sessão: o tempo de captura reproduzido é o da gravação, que não acompanha a parede e volta em `SEEK` e `LOOP`. P6 publica `ods.p6.replay.state` a cada 1 s em reprodução, o que mantém esse relógio andando mesmo quando nenhuma zona muda. Com o replay pausado, nenhuma janela fecha.
 
 **Métricas por zona** (`ZoneOccupancyAggregationStrategy`), em janelas semiabertas `[início, fim)`, para cada zona já vista em mensagens do S1:
 - **Dwell time médio:** média do `dwell_s` das transições `EXIT` na janela.
@@ -186,8 +195,8 @@ O `AggregateZoneMetricsUseCase`, com janelas móveis terminando em um instante d
 
 | Tabela | Colunas |
 | :--- | :--- |
-| `occupancy_metrics` | `zone_id`, `granularity`, `start_time`, `end_time`, `dwell_time_avg`, `occupancy_peak`, `total_count`, `occupancy_avg` |
-| `event_metrics` | `event_type`, `zone_id`, `object_class`, `granularity`, `start_time`, `end_time`, `count`, `uncertain_count`, `duration_avg_ms` |
+| `occupancy_metrics` | `zone_id`, `granularity`, `start_time`, `end_time`, `dwell_time_avg`, `occupancy_peak`, `total_count`, `occupancy_avg`, `mode`, `session_id` |
+| `event_metrics` | `event_type`, `zone_id`, `object_class`, `granularity`, `start_time`, `end_time`, `count`, `uncertain_count`, `duration_avg_ms`, `mode`, `session_id` |
 | `heatmap_cells` | `grid_id`, `timestamp`, `x`, `y`, `density` |
 
 **Rollup:** `DownsamplingRollupWorker.run(zone_id, reference_time)` encadeia `1s → 1m → 15m → 1h`. Ele deve ser disparado por um cron externo. Em cada salto, `DownsamplingService` consolida as métricas finas assim:
@@ -196,7 +205,9 @@ O `AggregateZoneMetricsUseCase`, com janelas móveis terminando em um instante d
 - `dwell_time_avg`: média **ponderada** por `total_count`;
 - `occupancy_avg`: média ponderada pela duração de cada janela fina.
 
-Bancos criados antes de `occupancy_avg` existir recebem a coluna na abertura, com valor `0`.
+Cada métrica é gravada com o `mode` (`LIVE` ou `REPLAY`) e o `session_id` que a produziram. Um replay reproduz o tempo de captura original, então as janelas dele coincidem com as da captura ao vivo daquele dia. Por isso as consultas leem só `LIVE`, salvo pedido explícito (`mode="REPLAY"`), e um replay não duplica o histórico.
+
+Bancos criados antes de `occupancy_avg`, `mode` e `session_id` existirem recebem as colunas na abertura, com `0` e `LIVE` nas linhas já gravadas.
 
 **API REST** (`create_metrics_query_router(repository)`, prefixo `/api/v5`):
 
@@ -249,9 +260,10 @@ curl "http://localhost:8000/api/v5/heatmaps/grid-1?start_time=2026-10-09T00:00:0
 
 | Verificação | Resultado |
 | :--- | :--- |
-| `pytest` (unitários + integração) | 133/133 aprovados |
+| `pytest` (unitários + integração) | 155/155 aprovados |
 | Invariantes de domínio | Coordenadas não finitas, janelas invertidas, densidades negativas, matrizes fora de 3×3, IDs vazios, envelopes fora do contrato e `EXIT` sem `dwell_s` lançam exceções específicas de `DomainError` |
 | Contrato de entrada | Exemplos de `ods.s1.zone_transition`, `ods.s1.zone_occupancy` e `ods.s2.event` da Especificação 1.0, deduplicação por `message_id` e regra de MAJOR.MINOR |
 | Contrato de saída | `ods.s5.zone_metrics` e `ods.s5.event_metrics` com envelope EV-SERVIÇO; fluxo de ponta a ponta pelo barramento em memória |
+| Sessão e replay | Reinício do estado por `ods.session.started`, relógio de captura em replay, pausa, `LOOP` com nova sessão e separação LIVE/REPLAY no DuckDB |
 | Persistência DuckDB | Escrita e consulta por zona, granularidade e intervalo de tempo |
 | API HTTP | Rotas `/api/v5/metrics` e `/api/v5/heatmaps` testadas via `TestClient` |

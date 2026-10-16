@@ -42,6 +42,11 @@ class InvalidEventMetricError(DomainError):
     incoerentes."""
 
 
+class InvalidSessionError(DomainError):
+    """Lançado quando um início de sessão (ods.session.started) ou um estado de replay
+    (ods.p6.replay.state) tem modo, estado ou valores fora do contrato."""
+
+
 class InvalidGranularityError(DomainError):
     """Lançado quando a granularidade não é uma de 1m, 15m, 1h e 1d."""
 

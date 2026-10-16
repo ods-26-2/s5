@@ -4,7 +4,8 @@ from src.application.use_cases.ingest_envelope_use_case import IngestEnvelopeUse
 
 class HandleBusMessageUseCase:
     """Ponto de entrada de cada mensagem assinada: ingere e guarda no buffer das janelas.
-    Retorna False quando a mensagem é repetida; erros de contrato sobem para o chamador."""
+    Retorna False quando a mensagem é repetida ou pertence a uma sessão já encerrada;
+    erros de contrato sobem para o chamador."""
 
     def __init__(self, ingest: IngestEnvelopeUseCase, buffer: MetricsBuffer) -> None:
         self._ingest = ingest
@@ -18,5 +19,4 @@ class HandleBusMessageUseCase:
         ingested = self._ingest.execute(raw_message)
         if ingested is None:
             return False
-        self._buffer.add(ingested)
-        return True
+        return self._buffer.add(ingested)

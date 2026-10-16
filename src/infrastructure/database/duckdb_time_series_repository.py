@@ -5,6 +5,7 @@ import duckdb
 from src.domain.entities.event_metric import EventMetric
 from src.domain.entities.heatmap_grid import HeatmapGrid
 from src.domain.entities.occupancy_metric import OccupancyMetric
+from src.domain.entities.session_start import LIVE
 from src.domain.repositories.i_time_series_repository import ITimeSeriesRepository
 from src.domain.value_objects.spatial_cell import SpatialCell
 from src.domain.value_objects.time_window import TimeWindow
@@ -30,13 +31,11 @@ class DuckDBTimeSeriesRepository(ITimeSeriesRepository):
                 dwell_time_avg DOUBLE,
                 occupancy_peak INTEGER,
                 total_count INTEGER,
-                occupancy_avg DOUBLE DEFAULT 0
+                occupancy_avg DOUBLE DEFAULT 0,
+                mode VARCHAR DEFAULT 'LIVE',
+                session_id VARCHAR
             )
             """
-        )
-        # Bancos criados antes de occupancy_avg existir recebem a coluna sem perder dados.
-        self._connection.execute(
-            "ALTER TABLE occupancy_metrics ADD COLUMN IF NOT EXISTS occupancy_avg DOUBLE DEFAULT 0"
         )
         self._connection.execute(
             """
@@ -49,7 +48,9 @@ class DuckDBTimeSeriesRepository(ITimeSeriesRepository):
                 end_time TIMESTAMP,
                 count INTEGER,
                 uncertain_count INTEGER,
-                duration_avg_ms INTEGER
+                duration_avg_ms INTEGER,
+                mode VARCHAR DEFAULT 'LIVE',
+                session_id VARCHAR
             )
             """
         )
@@ -64,14 +65,30 @@ class DuckDBTimeSeriesRepository(ITimeSeriesRepository):
             )
             """
         )
+        # Bancos criados antes destas colunas existirem as recebem sem perder dados; o que
+        # já estava gravado veio da captura ao vivo.
+        for statement in (
+            "ALTER TABLE occupancy_metrics ADD COLUMN IF NOT EXISTS occupancy_avg DOUBLE DEFAULT 0",
+            "ALTER TABLE occupancy_metrics ADD COLUMN IF NOT EXISTS mode VARCHAR DEFAULT 'LIVE'",
+            "ALTER TABLE occupancy_metrics ADD COLUMN IF NOT EXISTS session_id VARCHAR",
+            "ALTER TABLE event_metrics ADD COLUMN IF NOT EXISTS mode VARCHAR DEFAULT 'LIVE'",
+            "ALTER TABLE event_metrics ADD COLUMN IF NOT EXISTS session_id VARCHAR",
+        ):
+            self._connection.execute(statement)
 
-    def save_occupancy_metric(self, metric: OccupancyMetric, granularity: str) -> None:
+    def save_occupancy_metric(
+        self,
+        metric: OccupancyMetric,
+        granularity: str,
+        mode: str = LIVE,
+        session_id: str | None = None,
+    ) -> None:
         self._connection.execute(
             """
             INSERT INTO occupancy_metrics
                 (zone_id, granularity, start_time, end_time, dwell_time_avg, occupancy_peak,
-                 total_count, occupancy_avg)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                 total_count, occupancy_avg, mode, session_id)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             [
                 metric.zone_id,
@@ -82,16 +99,24 @@ class DuckDBTimeSeriesRepository(ITimeSeriesRepository):
                 metric.occupancy_peak,
                 metric.total_count,
                 metric.occupancy_avg,
+                mode,
+                session_id,
             ],
         )
 
-    def save_event_metric(self, metric: EventMetric, granularity: str) -> None:
+    def save_event_metric(
+        self,
+        metric: EventMetric,
+        granularity: str,
+        mode: str = LIVE,
+        session_id: str | None = None,
+    ) -> None:
         self._connection.execute(
             """
             INSERT INTO event_metrics
                 (event_type, zone_id, object_class, granularity, start_time, end_time,
-                 count, uncertain_count, duration_avg_ms)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 count, uncertain_count, duration_avg_ms, mode, session_id)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             [
                 metric.event_type,
@@ -103,20 +128,23 @@ class DuckDBTimeSeriesRepository(ITimeSeriesRepository):
                 metric.count,
                 metric.uncertain_count,
                 metric.duration_avg_ms,
+                mode,
+                session_id,
             ],
         )
 
     def query_event_metrics(
-        self, event_type: str, window: TimeWindow, granularity: str
+        self, event_type: str, window: TimeWindow, granularity: str, mode: str = LIVE
     ) -> list[EventMetric]:
         rows = self._connection.execute(
             """
             SELECT zone_id, object_class, start_time, end_time, count, uncertain_count, duration_avg_ms
             FROM event_metrics
-            WHERE event_type = ? AND granularity = ? AND start_time >= ? AND end_time <= ?
+            WHERE event_type = ? AND granularity = ? AND mode = ?
+                AND start_time >= ? AND end_time <= ?
             ORDER BY start_time
             """,
-            [event_type, granularity, window.start_time, window.end_time],
+            [event_type, granularity, mode, window.start_time, window.end_time],
         ).fetchall()
 
         return [
@@ -144,16 +172,17 @@ class DuckDBTimeSeriesRepository(ITimeSeriesRepository):
             )
 
     def query_metrics(
-        self, zone_id: str, window: TimeWindow, granularity: str
+        self, zone_id: str, window: TimeWindow, granularity: str, mode: str = LIVE
     ) -> list[OccupancyMetric]:
         rows = self._connection.execute(
             """
             SELECT start_time, end_time, dwell_time_avg, occupancy_peak, total_count, occupancy_avg
             FROM occupancy_metrics
-            WHERE zone_id = ? AND granularity = ? AND start_time >= ? AND end_time <= ?
+            WHERE zone_id = ? AND granularity = ? AND mode = ?
+                AND start_time >= ? AND end_time <= ?
             ORDER BY start_time
             """,
-            [zone_id, granularity, window.start_time, window.end_time],
+            [zone_id, granularity, mode, window.start_time, window.end_time],
         ).fetchall()
 
         return [
