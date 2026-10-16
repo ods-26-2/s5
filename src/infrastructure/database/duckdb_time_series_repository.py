@@ -2,6 +2,7 @@ from datetime import datetime
 
 import duckdb
 
+from src.domain.entities.event_metric import EventMetric
 from src.domain.entities.heatmap_grid import HeatmapGrid
 from src.domain.entities.occupancy_metric import OccupancyMetric
 from src.domain.repositories.i_time_series_repository import ITimeSeriesRepository
@@ -39,6 +40,21 @@ class DuckDBTimeSeriesRepository(ITimeSeriesRepository):
         )
         self._connection.execute(
             """
+            CREATE TABLE IF NOT EXISTS event_metrics (
+                event_type VARCHAR,
+                zone_id VARCHAR,
+                object_class VARCHAR,
+                granularity VARCHAR,
+                start_time TIMESTAMP,
+                end_time TIMESTAMP,
+                count INTEGER,
+                uncertain_count INTEGER,
+                duration_avg_ms INTEGER
+            )
+            """
+        )
+        self._connection.execute(
+            """
             CREATE TABLE IF NOT EXISTS heatmap_cells (
                 grid_id VARCHAR,
                 timestamp TIMESTAMP,
@@ -68,6 +84,53 @@ class DuckDBTimeSeriesRepository(ITimeSeriesRepository):
                 metric.occupancy_avg,
             ],
         )
+
+    def save_event_metric(self, metric: EventMetric, granularity: str) -> None:
+        self._connection.execute(
+            """
+            INSERT INTO event_metrics
+                (event_type, zone_id, object_class, granularity, start_time, end_time,
+                 count, uncertain_count, duration_avg_ms)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            [
+                metric.event_type,
+                metric.zone_id,
+                metric.object_class,
+                granularity,
+                metric.window.start_time,
+                metric.window.end_time,
+                metric.count,
+                metric.uncertain_count,
+                metric.duration_avg_ms,
+            ],
+        )
+
+    def query_event_metrics(
+        self, event_type: str, window: TimeWindow, granularity: str
+    ) -> list[EventMetric]:
+        rows = self._connection.execute(
+            """
+            SELECT zone_id, object_class, start_time, end_time, count, uncertain_count, duration_avg_ms
+            FROM event_metrics
+            WHERE event_type = ? AND granularity = ? AND start_time >= ? AND end_time <= ?
+            ORDER BY start_time
+            """,
+            [event_type, granularity, window.start_time, window.end_time],
+        ).fetchall()
+
+        return [
+            EventMetric(
+                event_type=event_type,
+                window=TimeWindow(start_time=row[2], end_time=row[3]),
+                count=row[4],
+                uncertain_count=row[5],
+                zone_id=row[0],
+                object_class=row[1],
+                duration_avg_ms=row[6],
+            )
+            for row in rows
+        ]
 
     def save_heatmap_grid(self, grid: HeatmapGrid, timestamp: datetime) -> None:
         rows = [

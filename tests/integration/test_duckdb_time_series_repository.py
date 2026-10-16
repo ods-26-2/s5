@@ -2,6 +2,7 @@ from datetime import datetime, timedelta
 
 import duckdb
 
+from src.domain.entities.event_metric import EventMetric
 from src.domain.entities.heatmap_grid import HeatmapGrid
 from src.domain.entities.occupancy_metric import OccupancyMetric
 from src.domain.value_objects.spatial_cell import SpatialCell
@@ -78,3 +79,24 @@ def test_deve_acrescentar_occupancy_avg_em_banco_criado_antes_da_coluna(tmp_path
 
     assert result[0].total_count == 2
     assert result[0].occupancy_avg == 0.0
+
+
+def test_deve_persistir_e_consultar_metrica_por_tipo_de_evento_no_duckdb():
+    repository = DuckDBTimeSeriesRepository(":memory:")
+    base_time = datetime(2026, 9, 23, 14, 0, 0)
+    window = TimeWindow(start_time=base_time, end_time=base_time + timedelta(hours=1))
+    repository.save_event_metric(
+        EventMetric(
+            event_type="PPE_NON_COMPLIANT", window=window, count=4, uncertain_count=1,
+            zone_id="galpao-solda", object_class="person", duration_avg_ms=12400,
+        ),
+        granularity="1h",
+    )
+
+    result = repository.query_event_metrics("PPE_NON_COMPLIANT", window, "1h")
+
+    assert len(result) == 1
+    assert result[0].count == 4
+    assert result[0].uncertain_count == 1
+    assert result[0].zone_id == "galpao-solda"
+    assert result[0].duration_avg_ms == 12400

@@ -28,14 +28,18 @@ s5/
 │   │   │                       #   GridDensityCalculator, DownsamplingService
 │   │   └── exceptions/         # Hierarquia de exceções (DomainError, ApplicationError)
 │   ├── application/            # 2. Orquestração de casos de uso e DTOs
-│   │   ├── use_cases/          # IngestEnvelope, AggregateZoneMetrics, GenerateHeatmap, RollupMetrics
+│   │   ├── use_cases/          # IngestEnvelope, HandleBusMessage, CloseMetricWindows,
+│   │   │                       #   AggregateZoneMetrics, GenerateHeatmap, RollupMetrics
 │   │   ├── parsers/            # Leitura do envelope comum de 13 campos
+│   │   ├── messaging/          # Montagem do envelope EV-SERVIÇO das mensagens publicadas
+│   │   ├── ports/              # IEventPublisher (publicação no B3)
+│   │   ├── state/              # MetricsBuffer (mensagens das janelas abertas)
 │   │   └── dtos/               # OccupancyMetricDTO, HeatmapQueryDTO
 │   ├── infrastructure/         # 3. Adaptadores e integrações externas
-│   │   ├── b3_bus/             # Consumidor do Barramento B3 (contrato + in-memory)
+│   │   ├── b3_bus/             # Consumidor/publicador do B3 (contrato + in-memory) e assinaturas do S5
 │   │   ├── database/           # DuckDBTimeSeriesRepository
 │   │   ├── i3_calibration/     # Carregador da matriz de homografia (JSON)
-│   │   └── workers/            # DownsamplingRollupWorker
+│   │   └── workers/            # MetricsWindowWorker, DownsamplingRollupWorker
 │   └── presentation/           # 4. Exposição de API
 │       └── http/               # Router FastAPI (/api/v5)
 └── tests/
@@ -54,8 +58,8 @@ Conforme definido em [`docs/responsability.md`](../docs/responsability.md):
 
 | Submódulo | Funcionalidade | Padrão / Arquitetura | Responsável |
 | :--- | :--- | :--- | :--- |
-| **S5.1 — Ingestor de Eventos B3** | Consumo Pub/Sub do B3, leitura do envelope comum, deduplicação por `message_id` e conversão de `ods.s1.zone_transition` e `ods.s1.zone_occupancy`. | Event Consumer + Deduplicator | Rafael Castro |
-| **S5.2 — Motor de Agregação** | Tempo de permanência (`dwell_s` do S1), pico e média de ocupação e contagem de entradas em janelas de 1m, 15m e 1h. | Time Window Engine + Aggregator Strategy | Rafael Castro |
+| **S5.1 — Ingestor de Eventos B3** | Consumo Pub/Sub do B3, leitura do envelope comum, deduplicação por `message_id` e conversão de `ods.s1.zone_transition`, `ods.s1.zone_occupancy` e `ods.s2.event`. | Event Consumer + Deduplicator | Rafael Castro |
+| **S5.2 — Motor de Agregação** | Métricas por zona (permanência, pico e média de ocupação, entradas) e por tipo de evento em janelas alinhadas de 1m, 15m, 1h e 1d, publicadas em `ods.s5.zone_metrics` e `ods.s5.event_metrics`. | Time Window Engine + Aggregator Strategy | Rafael Castro |
 | **S5.3 — Gerador de Mapa de Calor** | Projeção de pixels $(u, v)$ no plano de mundo pela homografia I3 ($H \in \mathbb{R}^{3\times 3}$) e cálculo de densidade em grade. | Spatial Coordinate Converter + Grid Density Calculator | Rafael Castro |
 | **S5.4 — Time-Series Store (DuckDB)** | Armazenamento colunar OLAP, worker de rollup (1s → 1m → 15m → 1h) e consultas SQL de séries temporais. | DuckDB Repository + Downsampling Rollup Worker | Rafael Castro |
 
@@ -64,15 +68,17 @@ Conforme definido em [`docs/responsability.md`](../docs/responsability.md):
 ## 🔄 Fluxo de Dados
 
 ```text
-Barramento B3 (ods.s1.zone_transition, ods.s1.zone_occupancy)
-  └─> B3EventConsumer.subscribe(topic, handler)                    (S5.1)
-        └─> IngestEnvelopeUseCase.execute(message)
-              parse_envelope → Envelope (13 campos, perfil EV-SINAL)
+Barramento B3 (ods.s1.zone_transition, ods.s1.zone_occupancy, ods.s2.event)
+  └─> subscribe_s5(consumer, handler) — um tópico por schema        (S5.1)
+        └─> HandleBusMessageUseCase.execute(message)
+              IngestEnvelopeUseCase → Envelope + ZoneTransition | ZoneOccupancySample | QualifiedEvent
               MessageDeduplicator → descarta message_id repetido
-              payload → ZoneTransition | ZoneOccupancySample
-  └─> AggregateZoneMetricsUseCase.execute(transitions, samples, zone_id, t)  (S5.2)
-        MovingWindowGenerator → janelas [t-1m, t), [t-15m, t), [t-1h, t)
-        ZoneOccupancyAggregationStrategy → OccupancyMetric por janela
+              MetricsBuffer.add → guarda até a janela fechar
+  └─> MetricsWindowWorker.run() → CloseMetricWindowsUseCase.execute(now)  (S5.2)
+        closed_windows → janelas alinhadas 1m, 15m, 1h, 1d que fecharam
+        ZoneOccupancyAggregationStrategy → OccupancyMetric por zona
+        EventMetricsAggregation → EventMetric por tipo de evento
+        persiste e publica ods.s5.zone_metrics / ods.s5.event_metrics
   └─> GenerateHeatmapUseCase.execute(pixels, H, grid_id, t)        (S5.3)
         SpatialCoordinateConverter (H · [u, v, 1]ᵀ) → WorldCoordinate
         GridDensityCalculator → HeatmapGrid (densidade 0.0–1.0)
@@ -109,30 +115,55 @@ Barramento B3 (ods.s1.zone_transition, ods.s1.zone_occupancy)
 ```
 
 **Processamento** (`IngestEnvelopeUseCase`):
-- Schema fora de `ods.s1.zone_transition` e `ods.s1.zone_occupancy` → `UnsupportedSchemaError`.
-- `parse_envelope` exige os seis campos fixos e os do perfil EV-SINAL (`captured_at`, `source_id`, `session_id`, `sequence`, `artifact_version`). Marcos de tempo precisam de fuso (`Z`) e são convertidos para UTC sem `tzinfo`, convenção de todo o S5. Campo ausente ou com formato inválido → `MalformedEventEnvelopeError`.
+- Schema fora de `ods.s1.zone_transition`, `ods.s1.zone_occupancy` e `ods.s2.event` → `UnsupportedSchemaError`.
+- `parse_envelope` exige os seis campos fixos e os do perfil do schema: EV-SINAL nas mensagens do S1 (`captured_at`, `source_id`, `session_id`, `sequence`, `artifact_version`) e EV-SERVIÇO no `ods.s2.event` (`captured_at`, `session_id`, `sequence`). Marcos de tempo precisam de fuso (`Z`) e são convertidos para UTC sem `tzinfo`, convenção de todo o S5. Campo ausente ou com formato inválido → `MalformedEventEnvelopeError`.
 - `MessageDeduplicator` descarta mensagens cujo `message_id` já foi aceito (regra 7) e retorna `None`. O id só é registrado depois que a mensagem é aceita.
 - `schema_version` com MAJOR diferente de `1` → `UnsupportedSchemaVersionError`; qualquer MINOR do MAJOR 1 é aceito (regra 8).
 
 Não há debounce nem histerese no S5: na 6c, a histerese é do S1, configurada pelo artefato ZONES, e a transição já chega confirmada.
 
-**Saída:** `ZoneTransition` ou `ZoneOccupancySample`, ou `None` quando a mensagem é repetida.
+**Saída:** `IngestedMessage` com o envelope e um `ZoneTransition`, `ZoneOccupancySample` ou `QualifiedEvent`, ou `None` quando a mensagem é repetida. `subscribe_s5` assina um tópico por schema; uma mensagem fora do contrato é registrada em log e descartada, sem interromper as seguintes.
 
-O `InMemoryB3EventConsumer` implementa o contrato `B3EventConsumer` sem broker real. Ele serve para desenvolvimento e testes e é o ponto de troca por um cliente Pub/Sub de verdade. O contrato espelha o consumidor usado no S4 (C++).
+O `InMemoryB3EventConsumer` implementa os contratos `B3EventConsumer` e `IEventPublisher` sem broker real: o que é publicado é entregue aos handlers do mesmo processo. Ele serve para desenvolvimento e testes e é o ponto de troca por um cliente Pub/Sub de verdade. O contrato espelha o consumidor usado no S4 (C++).
 
-## 📊 S5.2 — Motor de Agregação
+## 📊 S5.2 — Motor de Agregação e publicação
 
-**Entrada:** transições e amostras de ocupação de uma zona e um instante de referência.
+**Entrada:** o `MetricsBuffer`, alimentado pelo S5.1 com as transições, as amostras de ocupação e os eventos qualificados ainda dentro de uma janela aberta.
 
-**Processamento** (`ZoneOccupancyAggregationStrategy`), em janelas semiabertas `[início, fim)`:
+**Disparo:** `MetricsWindowWorker.run()`, chamado por um agendador externo em intervalo menor que a menor janela (ex.: a cada 5 s). Cada disparo fecha as janelas **alinhadas ao relógio UTC** (14:00–14:15, não t−15m–t) de **1m, 15m, 1h e 1d** que terminaram desde o disparo anterior. Disparos extras não publicam nada. Alguns detalhes:
+- uma janela só fecha 2 s depois do seu fim, para acolher a latência entre captura e publicação;
+- o primeiro disparo só marca o ponto de partida;
+- janelas perdidas entre dois disparos são fechadas todas, em ordem.
+
+**Métricas por zona** (`ZoneOccupancyAggregationStrategy`), em janelas semiabertas `[início, fim)`, para cada zona já vista em mensagens do S1:
 - **Dwell time médio:** média do `dwell_s` das transições `EXIT` na janela.
 - **Contagem total:** número de transições `ENTER` na janela.
 - **Pico de ocupação:** maior `count` vigente na janela.
 - **Ocupação média:** `count` médio ponderado pelo tempo em que cada amostra vigorou. A contagem no início da janela é a da última amostra anterior a ela; sem amostra anterior, a zona é considerada vazia.
 
-As janelas padrão são **1m, 15m e 1h**, gravadas com as granularidades `"1m"`, `"15m"` e `"1h"`.
+**Métricas por tipo de evento** (`EventMetricsAggregation`), uma por `(event_type, zone_id, class)` com ocorrência:
+- `count`: eventos distintos (`event_id`) cujo `started_at` cai na janela;
+- `uncertain_count`: desses, os que estavam `UNCERTAIN` na última publicação anterior ao fim da janela;
+- `duration_avg_ms`: média do `duration_ms` dos eventos `ENDED` na janela.
 
-**Saída:** `OccupancyMetricDTO { zone_id, dwell_time_avg, occupancy_peak, total_count, occupancy_avg }` por janela.
+**Saída:** cada métrica é persistida no DuckDB e publicada com o envelope EV-SERVIÇO (`producer: "S5"`, `captured_at` = fim da janela, `sequence` por sessão). `source_id` e `artifact_version` (versão de ZONES) vêm das últimas mensagens do S1 da zona; em `event_metrics`, `artifact_version` é a versão das regras do S2. Exemplo de `ods.s5.zone_metrics`:
+
+```json
+{
+  "message_type": "event", "schema": "ods.s5.zone_metrics", "schema_version": "1.0", "producer": "S5",
+  "captured_at": "2026-09-23T14:15:00.000Z", "source_id": "cam0", "artifact_version": "zones-a8-2",
+  "payload": {
+    "zone_id": "vaga-12",
+    "window_start_at": "2026-09-23T14:00:00.000Z", "window_end_at": "2026-09-23T14:15:00.000Z",
+    "granularity": "15m",
+    "total_count": 3, "occupancy_peak": 1, "occupancy_avg": 0.72, "dwell_avg_s": 1830
+  }
+}
+```
+
+O `MetricsBuffer` descarta o que ficou mais de um dia antes da última janela fechada. Ele preserva a última amostra de ocupação de cada zona e os eventos do S2 ainda não encerrados.
+
+O `AggregateZoneMetricsUseCase`, com janelas móveis terminando em um instante de referência, continua disponível para cálculo sob demanda.
 
 ## 🗺️ S5.3 — Gerador de Mapa de Calor
 
@@ -156,6 +187,7 @@ As janelas padrão são **1m, 15m e 1h**, gravadas com as granularidades `"1m"`,
 | Tabela | Colunas |
 | :--- | :--- |
 | `occupancy_metrics` | `zone_id`, `granularity`, `start_time`, `end_time`, `dwell_time_avg`, `occupancy_peak`, `total_count`, `occupancy_avg` |
+| `event_metrics` | `event_type`, `zone_id`, `object_class`, `granularity`, `start_time`, `end_time`, `count`, `uncertain_count`, `duration_avg_ms` |
 | `heatmap_cells` | `grid_id`, `timestamp`, `x`, `y`, `density` |
 
 **Rollup:** `DownsamplingRollupWorker.run(zone_id, reference_time)` encadeia `1s → 1m → 15m → 1h`. Ele deve ser disparado por um cron externo. Em cada salto, `DownsamplingService` consolida as métricas finas assim:
@@ -217,8 +249,9 @@ curl "http://localhost:8000/api/v5/heatmaps/grid-1?start_time=2026-10-09T00:00:0
 
 | Verificação | Resultado |
 | :--- | :--- |
-| `pytest` (unitários + integração) | 99/99 aprovados |
+| `pytest` (unitários + integração) | 133/133 aprovados |
 | Invariantes de domínio | Coordenadas não finitas, janelas invertidas, densidades negativas, matrizes fora de 3×3, IDs vazios, envelopes fora do contrato e `EXIT` sem `dwell_s` lançam exceções específicas de `DomainError` |
-| Contrato de entrada | Exemplos de `ods.s1.zone_transition` e `ods.s1.zone_occupancy` da Especificação 1.0, deduplicação por `message_id` e regra de MAJOR.MINOR |
+| Contrato de entrada | Exemplos de `ods.s1.zone_transition`, `ods.s1.zone_occupancy` e `ods.s2.event` da Especificação 1.0, deduplicação por `message_id` e regra de MAJOR.MINOR |
+| Contrato de saída | `ods.s5.zone_metrics` e `ods.s5.event_metrics` com envelope EV-SERVIÇO; fluxo de ponta a ponta pelo barramento em memória |
 | Persistência DuckDB | Escrita e consulta por zona, granularidade e intervalo de tempo |
 | API HTTP | Rotas `/api/v5/metrics` e `/api/v5/heatmaps` testadas via `TestClient` |

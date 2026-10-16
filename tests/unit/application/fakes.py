@@ -1,5 +1,6 @@
 from datetime import datetime
 
+from src.domain.entities.event_metric import EventMetric
 from src.domain.entities.heatmap_grid import HeatmapGrid
 from src.domain.entities.occupancy_metric import OccupancyMetric
 from src.domain.repositories.i_time_series_repository import ITimeSeriesRepository
@@ -12,10 +13,14 @@ class FakeTimeSeriesRepository(ITimeSeriesRepository):
     def __init__(self) -> None:
         self.saved_metrics: list[tuple[OccupancyMetric, str]] = []
         self.saved_heatmaps: list[tuple[HeatmapGrid, datetime]] = []
+        self.saved_event_metrics: list[tuple[EventMetric, str]] = []
         self.metrics_to_return: list[OccupancyMetric] = []
 
     def save_occupancy_metric(self, metric: OccupancyMetric, granularity: str) -> None:
         self.saved_metrics.append((metric, granularity))
+
+    def save_event_metric(self, metric: EventMetric, granularity: str) -> None:
+        self.saved_event_metrics.append((metric, granularity))
 
     def save_heatmap_grid(self, grid: HeatmapGrid, timestamp: datetime) -> None:
         self.saved_heatmaps.append((grid, timestamp))

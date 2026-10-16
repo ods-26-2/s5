@@ -3,6 +3,7 @@ from datetime import datetime
 import pytest
 
 from src.application.use_cases.ingest_envelope_use_case import IngestEnvelopeUseCase
+from src.domain.entities.qualified_event import QualifiedEvent
 from src.domain.entities.zone_occupancy_sample import ZoneOccupancySample
 from src.domain.entities.zone_transition import ZoneTransition
 from src.domain.exceptions import (
@@ -11,7 +12,7 @@ from src.domain.exceptions import (
     UnsupportedSchemaVersionError,
 )
 from src.domain.services.message_deduplicator import MessageDeduplicator
-from tests.fixtures.spec_examples import zone_occupancy, zone_transition_exit
+from tests.fixtures.spec_examples import qualified_event, zone_occupancy, zone_transition_exit
 
 
 def _use_case() -> IngestEnvelopeUseCase:
@@ -19,9 +20,11 @@ def _use_case() -> IngestEnvelopeUseCase:
 
 
 def test_deve_converter_zone_transition_do_exemplo_da_especificacao():
-    message = _use_case().execute(zone_transition_exit())
+    ingested = _use_case().execute(zone_transition_exit())
+    message = ingested.message
 
     assert isinstance(message, ZoneTransition)
+    assert ingested.envelope.artifact_version == "zones-a8-2"
     assert message.zone_id == "vaga-12"
     assert message.transition == "EXIT"
     assert message.object_class == "vehicle"
@@ -31,7 +34,7 @@ def test_deve_converter_zone_transition_do_exemplo_da_especificacao():
 
 
 def test_deve_converter_zone_occupancy_do_exemplo_da_especificacao():
-    message = _use_case().execute(zone_occupancy())
+    message = _use_case().execute(zone_occupancy()).message
 
     assert isinstance(message, ZoneOccupancySample)
     assert message.zone_id == "vaga-12"
@@ -87,5 +90,32 @@ def test_deve_rejeitar_exit_sem_dwell_s():
 def test_deve_rejeitar_payload_sem_campo_obrigatorio():
     message = zone_transition_exit()
     del message["payload"]["zone_id"]
+    with pytest.raises(MalformedEventEnvelopeError):
+        _use_case().execute(message)
+
+
+def test_deve_converter_s2_event_do_exemplo_da_especificacao():
+    message = _use_case().execute(qualified_event()).message
+
+    assert isinstance(message, QualifiedEvent)
+    assert message.event_type == "PPE_NON_COMPLIANT"
+    assert message.status == "CONFIRMED"
+    assert message.phase == "STARTED"
+    assert message.zone_id == "galpao-solda"
+    assert message.object_class == "person"
+    assert message.started_at == datetime(2026, 9, 23, 14, 29, 52)
+    assert message.duration_ms == 8000
+
+
+def test_deve_aceitar_s2_event_sem_source_id_e_artifact_version():
+    message = qualified_event()
+    del message["source_id"]
+    del message["artifact_version"]
+    assert _use_case().execute(message) is not None
+
+
+def test_deve_rejeitar_s2_event_sem_sequence():
+    message = qualified_event()
+    del message["sequence"]
     with pytest.raises(MalformedEventEnvelopeError):
         _use_case().execute(message)
