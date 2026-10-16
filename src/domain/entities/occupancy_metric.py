@@ -13,6 +13,7 @@ class OccupancyMetric:
     dwell_time_avg: float
     occupancy_peak: int
     total_count: int
+    occupancy_avg: float = 0.0
 
     def __post_init__(self) -> None:
         if not self.zone_id.strip():
@@ -23,3 +24,5 @@ class OccupancyMetric:
             raise InvalidOccupancyMetricError("occupancy_peak não pode ser negativo.")
         if self.total_count < 0:
             raise InvalidOccupancyMetricError("total_count não pode ser negativo.")
+        if self.occupancy_avg < 0:
+            raise InvalidOccupancyMetricError("occupancy_avg não pode ser negativo.")

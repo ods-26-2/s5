@@ -40,3 +40,22 @@ def test_deve_lancar_excecao_quando_lista_de_metricas_for_vazia():
 
     with pytest.raises(InvalidOccupancyMetricError):
         DownsamplingService().rollup([], zone_id="zone-01", target_window=target_window)
+
+
+def test_deve_consolidar_ocupacao_media_ponderada_pela_duracao_das_janelas():
+    base_time = datetime(2026, 9, 10, 10, 0, 0)
+    short = OccupancyMetric(
+        zone_id="zone-01",
+        window=TimeWindow(start_time=base_time, end_time=base_time + timedelta(seconds=10)),
+        dwell_time_avg=0.0, occupancy_peak=4, total_count=0, occupancy_avg=4.0,
+    )
+    long = OccupancyMetric(
+        zone_id="zone-01",
+        window=TimeWindow(start_time=base_time + timedelta(seconds=10), end_time=base_time + timedelta(seconds=40)),
+        dwell_time_avg=0.0, occupancy_peak=1, total_count=0, occupancy_avg=0.0,
+    )
+    target_window = TimeWindow(start_time=base_time, end_time=base_time + timedelta(seconds=40))
+
+    consolidated = DownsamplingService().rollup([short, long], zone_id="zone-01", target_window=target_window)
+
+    assert consolidated.occupancy_avg == pytest.approx(1.0)

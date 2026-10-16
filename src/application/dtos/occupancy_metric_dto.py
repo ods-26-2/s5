@@ -11,6 +11,7 @@ class OccupancyMetricDTO:
     dwell_time_avg: float
     occupancy_peak: int
     total_count: int
+    occupancy_avg: float
 
     @staticmethod
     def from_entity(metric: OccupancyMetric) -> "OccupancyMetricDTO":
@@ -19,4 +20,5 @@ class OccupancyMetricDTO:
             dwell_time_avg=metric.dwell_time_avg,
             occupancy_peak=metric.occupancy_peak,
             total_count=metric.total_count,
+            occupancy_avg=metric.occupancy_avg,
         )

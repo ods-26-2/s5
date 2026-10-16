@@ -18,8 +18,18 @@ class InvalidTimeWindowError(DomainError):
     """Lançado quando start_time é maior ou igual a end_time."""
 
 
-class InvalidNormalizedEventError(DomainError):
-    """Lançado quando um evento normalizado recebe event_type ou origin vazios."""
+class InvalidEnvelopeError(DomainError):
+    """Lançado quando o envelope comum (Especificação 1.0, seção 3) viola suas regras:
+    message_type fora do enum, identificadores vazios ou schema_version fora de MAJOR.MINOR."""
+
+
+class InvalidZoneTransitionError(DomainError):
+    """Lançado quando uma transição de zona de S1 tem sentido inválido, ids vazios ou
+    EXIT sem dwell_s."""
+
+
+class InvalidZoneOccupancyError(DomainError):
+    """Lançado quando uma amostra de ocupação de S1 tem zone_id vazio ou contagem negativa."""
 
 
 class InvalidOccupancyMetricError(DomainError):
@@ -43,4 +53,13 @@ class ApplicationError(ODSBaseException):
 
 
 class MalformedEventEnvelopeError(ApplicationError):
-    """Lançado quando o envelope B1/B3 não contém os campos obrigatórios para normalização."""
+    """Lançado quando a mensagem não contém os campos obrigatórios do envelope, do perfil
+    ou do payload, ou quando um campo tem tipo ou formato inválido."""
+
+
+class UnsupportedSchemaError(ApplicationError):
+    """Lançado quando chega uma mensagem de um schema que o S5 não consome."""
+
+
+class UnsupportedSchemaVersionError(ApplicationError):
+    """Lançado quando o MAJOR de schema_version é diferente do que o S5 conhece (regra 8)."""

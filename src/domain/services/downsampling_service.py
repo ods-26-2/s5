@@ -23,7 +23,16 @@ class DownsamplingService:
             dwell_time_avg=dwell_time_avg,
             occupancy_peak=occupancy_peak,
             total_count=total_count,
+            occupancy_avg=self._duration_weighted_occupancy_avg(metrics),
         )
+
+    @staticmethod
+    def _duration_weighted_occupancy_avg(metrics: list[OccupancyMetric]) -> float:
+        total_seconds = sum(metric.window.duration_seconds for metric in metrics)
+        weighted_sum = sum(
+            metric.occupancy_avg * metric.window.duration_seconds for metric in metrics
+        )
+        return weighted_sum / total_seconds
 
     @staticmethod
     def _weighted_dwell_time_avg(metrics: list[OccupancyMetric], total_count: int) -> float:
