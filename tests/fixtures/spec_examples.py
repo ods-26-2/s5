@@ -1,5 +1,5 @@
 """Mensagens da Especificação de interfaces 1.0 (seção 7), completadas com os campos de
-envelope que os exemplos omitem (seção 3, perfil EV-SINAL). Cada função devolve uma
+envelope que os exemplos omitem (seção 3, perfis EV-SINAL e EV-SERVIÇO). Cada função devolve uma
 cópia nova, para que um teste possa alterá-la sem afetar os demais."""
 
 import copy
@@ -49,6 +49,36 @@ _ZONE_OCCUPANCY = {
     },
 }
 
+_QUALIFIED_EVENT = {
+    "message_type": "event",
+    "message_id": "3d4e5f60-7182-4c9d-8e0f-2a3b4c5d6e7f",
+    "schema": "ods.s2.event",
+    "schema_version": "1.0",
+    "producer": "S2",
+    "published_at": "2026-09-23T14:30:00.150Z",
+    "captured_at": "2026-09-23T14:30:00.000Z",
+    "source_id": "cam0",
+    "session_id": SESSION_ID,
+    "sequence": 311,
+    "artifact_version": "rules-a5-3",
+    "payload": {
+        "event_id": "6d9f2b1c-3e4a-4b5c-8d6e-7f8a9b0c1d2e",
+        "event_type": "PPE_NON_COMPLIANT",
+        "rule_id": "a5-luva-galpao",
+        "status": "CONFIRMED",
+        "phase": "STARTED",
+        "confidence": 0.81,
+        "entity_id": "e-7a21",
+        "class": "person",
+        "zone_id": "galpao-solda",
+        "equipment_item": "luva",
+        "started_at": "2026-09-23T14:29:52.000Z",
+        "duration_ms": 8000,
+        "source_ids": ["cam0"],
+        "details": {"compliance": "ABSENT", "min_duration_ms": 5000},
+    },
+}
+
 
 def zone_transition_exit() -> dict:
     return copy.deepcopy(_ZONE_TRANSITION_EXIT)
@@ -56,3 +86,7 @@ def zone_transition_exit() -> dict:
 
 def zone_occupancy() -> dict:
     return copy.deepcopy(_ZONE_OCCUPANCY)
+
+
+def qualified_event() -> dict:
+    return copy.deepcopy(_QUALIFIED_EVENT)

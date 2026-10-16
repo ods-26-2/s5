@@ -1,6 +1,8 @@
 from abc import ABC, abstractmethod
 from collections.abc import Callable
 
+from src.application.ports.event_publisher import IEventPublisher
+
 EventHandler = Callable[[dict], None]
 
 
@@ -19,9 +21,10 @@ class B3EventConsumer(ABC):
     def stop(self) -> None: ...
 
 
-class InMemoryB3EventConsumer(B3EventConsumer):
-    """Implementação em memória, sem acoplar a um broker real. Útil para desenvolvimento,
-    testes e como ponto de substituição por um client Pub/Sub de verdade."""
+class InMemoryB3EventConsumer(B3EventConsumer, IEventPublisher):
+    """Barramento em memória, sem acoplar a um broker real: o que é publicado é entregue
+    aos handlers do mesmo processo. Útil para desenvolvimento, testes e como ponto de
+    substituição por um client Pub/Sub de verdade."""
 
     def __init__(self) -> None:
         self._handlers: dict[str, list[EventHandler]] = {}
@@ -36,8 +39,8 @@ class InMemoryB3EventConsumer(B3EventConsumer):
     def stop(self) -> None:
         self._running = False
 
-    def publish(self, topic: str, envelope: dict) -> None:
+    def publish(self, topic: str, message: dict) -> None:
         if not self._running:
             return
         for handler in self._handlers.get(topic, []):
-            handler(envelope)
+            handler(message)

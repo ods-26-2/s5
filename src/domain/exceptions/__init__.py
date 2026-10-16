@@ -32,6 +32,20 @@ class InvalidZoneOccupancyError(DomainError):
     """Lançado quando uma amostra de ocupação de S1 tem zone_id vazio ou contagem negativa."""
 
 
+class InvalidQualifiedEventError(DomainError):
+    """Lançado quando um evento qualificado de S2 tem status ou phase fora do enum,
+    ids vazios ou duração negativa."""
+
+
+class InvalidEventMetricError(DomainError):
+    """Lançado quando uma métrica por tipo de evento tem event_type vazio ou contagens
+    incoerentes."""
+
+
+class InvalidGranularityError(DomainError):
+    """Lançado quando a granularidade não é uma de 1m, 15m, 1h e 1d."""
+
+
 class InvalidOccupancyMetricError(DomainError):
     """Lançado quando uma métrica de ocupação recebe zone_id vazio ou valores negativos."""
 

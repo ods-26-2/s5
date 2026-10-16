@@ -1,6 +1,7 @@
 from abc import ABC, abstractmethod
 from datetime import datetime
 
+from src.domain.entities.event_metric import EventMetric
 from src.domain.entities.heatmap_grid import HeatmapGrid
 from src.domain.entities.occupancy_metric import OccupancyMetric
 from src.domain.value_objects.time_window import TimeWindow
@@ -11,6 +12,9 @@ class ITimeSeriesRepository(ABC):
 
     @abstractmethod
     def save_occupancy_metric(self, metric: OccupancyMetric, granularity: str) -> None: ...
+
+    @abstractmethod
+    def save_event_metric(self, metric: EventMetric, granularity: str) -> None: ...
 
     @abstractmethod
     def save_heatmap_grid(self, grid: HeatmapGrid, timestamp: datetime) -> None: ...
