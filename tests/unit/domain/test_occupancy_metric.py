@@ -39,3 +39,11 @@ def test_deve_lancar_excecao_quando_total_count_for_negativo():
         OccupancyMetric(
             zone_id="zone-01", window=_window(), dwell_time_avg=0.0, occupancy_peak=0, total_count=-1
         )
+
+
+def test_deve_lancar_excecao_quando_occupancy_avg_for_negativo():
+    with pytest.raises(InvalidOccupancyMetricError):
+        OccupancyMetric(
+            zone_id="zone-01", window=_window(), dwell_time_avg=0.0, occupancy_peak=0,
+            total_count=0, occupancy_avg=-0.5,
+        )

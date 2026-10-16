@@ -1,62 +1,85 @@
 from abc import ABC, abstractmethod
+from datetime import datetime
 
-from src.domain.entities.normalized_event import NormalizedEvent
 from src.domain.entities.occupancy_metric import OccupancyMetric
+from src.domain.entities.zone_occupancy_sample import ZoneOccupancySample
+from src.domain.entities.zone_transition import ENTER, EXIT, ZoneTransition
 from src.domain.value_objects.time_window import TimeWindow
-
-ENTER_EVENT_TYPE = "enter"
-EXIT_EVENT_TYPE = "exit"
 
 
 class AggregationStrategy(ABC):
-    """Converte um conjunto de eventos normalizados de uma zona em uma métrica acumulada."""
+    """Converte as transições e as amostras de ocupação de uma zona em uma métrica acumulada."""
 
     @abstractmethod
     def aggregate(
-        self, events: list[NormalizedEvent], zone_id: str, window: TimeWindow
+        self,
+        transitions: list[ZoneTransition],
+        samples: list[ZoneOccupancySample],
+        zone_id: str,
+        window: TimeWindow,
     ) -> OccupancyMetric: ...
 
 
-class DwellTimeAggregationStrategy(AggregationStrategy):
-    """Pareia eventos enter/exit em ordem cronológica para calcular tempo de
-    permanência médio, pico de ocupação simultânea e contagem total de entradas."""
+class ZoneOccupancyAggregationStrategy(AggregationStrategy):
+    """Agrega o que S1 já confirmou, sem refazer histerese nem pareamento:
+
+    - total_count: transições ENTER na janela;
+    - dwell_time_avg: média do dwell_s das transições EXIT na janela;
+    - occupancy_peak: maior contagem vigente na janela;
+    - occupancy_avg: contagem média ponderada pelo tempo em que cada amostra vigorou.
+
+    A janela é semiaberta [start, end), para que janelas adjacentes não contem o mesmo
+    instante duas vezes. A contagem vigente no início da janela é a da última amostra
+    anterior a ela; sem amostra anterior, a zona é considerada vazia.
+    """
 
     def aggregate(
-        self, events: list[NormalizedEvent], zone_id: str, window: TimeWindow
+        self,
+        transitions: list[ZoneTransition],
+        samples: list[ZoneOccupancySample],
+        zone_id: str,
+        window: TimeWindow,
     ) -> OccupancyMetric:
-        entries = sorted(
-            (e for e in events if e.event_type == ENTER_EVENT_TYPE), key=lambda e: e.timestamp
+        in_window = [
+            t for t in transitions if t.zone_id == zone_id and _contains(window, t.occurred_at)
+        ]
+        dwell_values = [t.dwell_s for t in in_window if t.transition == EXIT]
+        zone_samples = sorted(
+            (s for s in samples if s.zone_id == zone_id), key=lambda s: s.observed_at
         )
-        exits = sorted(
-            (e for e in events if e.event_type == EXIT_EVENT_TYPE), key=lambda e: e.timestamp
-        )
+        steps = self._count_steps(zone_samples, window)
 
         return OccupancyMetric(
             zone_id=zone_id,
             window=window,
-            dwell_time_avg=self._average_dwell_time(entries, exits),
-            occupancy_peak=self._peak_concurrency(entries, exits),
-            total_count=len(entries),
+            dwell_time_avg=sum(dwell_values) / len(dwell_values) if dwell_values else 0.0,
+            occupancy_peak=max(count for _, count in steps),
+            total_count=sum(1 for t in in_window if t.transition == ENTER),
+            occupancy_avg=self._time_weighted_average(steps, window),
         )
 
     @staticmethod
-    def _average_dwell_time(
-        entries: list[NormalizedEvent], exits: list[NormalizedEvent]
-    ) -> float:
-        pairs = list(zip(entries, exits))
-        if not pairs:
-            return 0.0
-        durations = [(exit_.timestamp - enter.timestamp).total_seconds() for enter, exit_ in pairs]
-        return sum(durations) / len(durations)
+    def _count_steps(
+        samples: list[ZoneOccupancySample], window: TimeWindow
+    ) -> list[tuple[datetime, int]]:
+        """Função degrau da contagem dentro da janela: (instante de início, contagem)."""
+        initial_count = 0
+        for sample in samples:
+            if sample.observed_at < window.start_time:
+                initial_count = sample.count
+        steps = [(window.start_time, initial_count)]
+        steps += [(s.observed_at, s.count) for s in samples if _contains(window, s.observed_at)]
+        return steps
 
     @staticmethod
-    def _peak_concurrency(entries: list[NormalizedEvent], exits: list[NormalizedEvent]) -> int:
-        timeline = [(e.timestamp, 1) for e in entries] + [(e.timestamp, -1) for e in exits]
-        timeline.sort(key=lambda item: item[0])
+    def _time_weighted_average(steps: list[tuple[datetime, int]], window: TimeWindow) -> float:
+        boundaries = [start for start, _ in steps[1:]] + [window.end_time]
+        weighted_sum = sum(
+            count * (end - start).total_seconds()
+            for (start, count), end in zip(steps, boundaries)
+        )
+        return weighted_sum / window.duration_seconds
 
-        current = 0
-        peak = 0
-        for _, delta in timeline:
-            current += delta
-            peak = max(peak, current)
-        return peak
+
+def _contains(window: TimeWindow, instant: datetime) -> bool:
+    return window.start_time <= instant < window.end_time

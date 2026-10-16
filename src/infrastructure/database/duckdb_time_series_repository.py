@@ -28,9 +28,14 @@ class DuckDBTimeSeriesRepository(ITimeSeriesRepository):
                 end_time TIMESTAMP,
                 dwell_time_avg DOUBLE,
                 occupancy_peak INTEGER,
-                total_count INTEGER
+                total_count INTEGER,
+                occupancy_avg DOUBLE DEFAULT 0
             )
             """
+        )
+        # Bancos criados antes de occupancy_avg existir recebem a coluna sem perder dados.
+        self._connection.execute(
+            "ALTER TABLE occupancy_metrics ADD COLUMN IF NOT EXISTS occupancy_avg DOUBLE DEFAULT 0"
         )
         self._connection.execute(
             """
@@ -48,8 +53,9 @@ class DuckDBTimeSeriesRepository(ITimeSeriesRepository):
         self._connection.execute(
             """
             INSERT INTO occupancy_metrics
-                (zone_id, granularity, start_time, end_time, dwell_time_avg, occupancy_peak, total_count)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+                (zone_id, granularity, start_time, end_time, dwell_time_avg, occupancy_peak,
+                 total_count, occupancy_avg)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """,
             [
                 metric.zone_id,
@@ -59,6 +65,7 @@ class DuckDBTimeSeriesRepository(ITimeSeriesRepository):
                 metric.dwell_time_avg,
                 metric.occupancy_peak,
                 metric.total_count,
+                metric.occupancy_avg,
             ],
         )
 
@@ -78,7 +85,7 @@ class DuckDBTimeSeriesRepository(ITimeSeriesRepository):
     ) -> list[OccupancyMetric]:
         rows = self._connection.execute(
             """
-            SELECT start_time, end_time, dwell_time_avg, occupancy_peak, total_count
+            SELECT start_time, end_time, dwell_time_avg, occupancy_peak, total_count, occupancy_avg
             FROM occupancy_metrics
             WHERE zone_id = ? AND granularity = ? AND start_time >= ? AND end_time <= ?
             ORDER BY start_time
@@ -93,6 +100,7 @@ class DuckDBTimeSeriesRepository(ITimeSeriesRepository):
                 dwell_time_avg=row[2],
                 occupancy_peak=row[3],
                 total_count=row[4],
+                occupancy_avg=row[5],
             )
             for row in rows
         ]
