@@ -1,3 +1,6 @@
+from collections.abc import Callable
+from datetime import datetime, timedelta, timezone
+
 import duckdb
 
 from src.domain.entities.event_metric import EventMetric
@@ -8,12 +11,26 @@ from src.domain.repositories.i_time_series_repository import ITimeSeriesReposito
 from src.domain.value_objects.time_window import TimeWindow
 
 
-class DuckDBTimeSeriesRepository(ITimeSeriesRepository):
-    """Armazenamento analítico colunar (OLAP) de métricas de ocupação e células de mapa
-    de calor, com consultas SQL de séries temporais para a aplicação."""
+PRESENCE_BUCKET = timedelta(minutes=1)
 
-    def __init__(self, database_path: str = ":memory:") -> None:
+
+def _utc_now() -> datetime:
+    return datetime.now(timezone.utc).replace(tzinfo=None)
+
+
+class DuckDBTimeSeriesRepository(ITimeSeriesRepository):
+    """Armazenamento analítico colunar (OLAP) das métricas por zona, por tipo de evento e
+    da presença por célula, com consultas SQL de séries temporais.
+
+    Toda linha guarda stored_at, o instante UTC em que foi gravada. É por ele que os dados
+    de replay expiram, já que o tempo de captura deles é o da gravação reproduzida.
+    """
+
+    def __init__(
+        self, database_path: str = ":memory:", clock: Callable[[], datetime] = _utc_now
+    ) -> None:
         self._connection = duckdb.connect(database_path)
+        self._clock = clock
         self._create_schema()
 
     def _create_schema(self) -> None:
@@ -29,7 +46,8 @@ class DuckDBTimeSeriesRepository(ITimeSeriesRepository):
                 total_count INTEGER,
                 occupancy_avg DOUBLE DEFAULT 0,
                 mode VARCHAR DEFAULT 'LIVE',
-                session_id VARCHAR
+                session_id VARCHAR,
+                stored_at TIMESTAMP
             )
             """
         )
@@ -46,7 +64,8 @@ class DuckDBTimeSeriesRepository(ITimeSeriesRepository):
                 uncertain_count INTEGER,
                 duration_avg_ms INTEGER,
                 mode VARCHAR DEFAULT 'LIVE',
-                session_id VARCHAR
+                session_id VARCHAR,
+                stored_at TIMESTAMP
             )
             """
         )
@@ -61,7 +80,8 @@ class DuckDBTimeSeriesRepository(ITimeSeriesRepository):
                 cell_x INTEGER,
                 cell_y INTEGER,
                 bucket_start TIMESTAMP,
-                seconds DOUBLE
+                seconds DOUBLE,
+                stored_at TIMESTAMP
             )
             """
         )
@@ -73,8 +93,18 @@ class DuckDBTimeSeriesRepository(ITimeSeriesRepository):
             "ALTER TABLE occupancy_metrics ADD COLUMN IF NOT EXISTS session_id VARCHAR",
             "ALTER TABLE event_metrics ADD COLUMN IF NOT EXISTS mode VARCHAR DEFAULT 'LIVE'",
             "ALTER TABLE event_metrics ADD COLUMN IF NOT EXISTS session_id VARCHAR",
+            "ALTER TABLE occupancy_metrics ADD COLUMN IF NOT EXISTS stored_at TIMESTAMP",
+            "ALTER TABLE event_metrics ADD COLUMN IF NOT EXISTS stored_at TIMESTAMP",
+            "ALTER TABLE presence_cells ADD COLUMN IF NOT EXISTS stored_at TIMESTAMP",
         ):
             self._connection.execute(statement)
+        # Linhas gravadas antes de stored_at existir recebem o instante da migração: assim
+        # as de replay expiram replay_days depois dela, em vez de nunca expirarem.
+        migrated_at = self._clock()
+        for table in ("occupancy_metrics", "event_metrics", "presence_cells"):
+            self._connection.execute(
+                f"UPDATE {table} SET stored_at = ? WHERE stored_at IS NULL", [migrated_at]
+            )
 
     def save_occupancy_metric(
         self,
@@ -87,8 +117,8 @@ class DuckDBTimeSeriesRepository(ITimeSeriesRepository):
             """
             INSERT INTO occupancy_metrics
                 (zone_id, granularity, start_time, end_time, dwell_time_avg, occupancy_peak,
-                 total_count, occupancy_avg, mode, session_id)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 total_count, occupancy_avg, mode, session_id, stored_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             [
                 metric.zone_id,
@@ -101,6 +131,7 @@ class DuckDBTimeSeriesRepository(ITimeSeriesRepository):
                 metric.occupancy_avg,
                 mode,
                 session_id,
+                self._clock(),
             ],
         )
 
@@ -115,8 +146,8 @@ class DuckDBTimeSeriesRepository(ITimeSeriesRepository):
             """
             INSERT INTO event_metrics
                 (event_type, zone_id, object_class, granularity, start_time, end_time,
-                 count, uncertain_count, duration_avg_ms, mode, session_id)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 count, uncertain_count, duration_avg_ms, mode, session_id, stored_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             [
                 metric.event_type,
@@ -130,10 +161,12 @@ class DuckDBTimeSeriesRepository(ITimeSeriesRepository):
                 metric.duration_avg_ms,
                 mode,
                 session_id,
+                self._clock(),
             ],
         )
 
     def save_presence(self, cells: list[tuple[PresenceKey, float, str]]) -> None:
+        stored_at = self._clock()
         rows = [
             [
                 mode,
@@ -145,12 +178,19 @@ class DuckDBTimeSeriesRepository(ITimeSeriesRepository):
                 key.cell_y,
                 key.bucket_start,
                 seconds,
+                stored_at,
             ]
             for key, seconds, mode in cells
         ]
         if rows:
             self._connection.executemany(
-                "INSERT INTO presence_cells VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)", rows
+                """
+                INSERT INTO presence_cells
+                    (mode, session_id, space_kind, space_key, object_class,
+                     cell_x, cell_y, bucket_start, seconds, stored_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                rows,
             )
 
     def query_presence(
@@ -237,6 +277,30 @@ class DuckDBTimeSeriesRepository(ITimeSeriesRepository):
             )
             for row in rows
         ]
+
+    def delete_live_metrics_before(self, granularity: str, cutoff: datetime) -> int:
+        return sum(
+            self._delete(
+                f"DELETE FROM {table} WHERE mode = ? AND granularity = ? AND end_time < ?",
+                [LIVE, granularity, cutoff],
+            )
+            for table in ("occupancy_metrics", "event_metrics")
+        )
+
+    def delete_live_presence_before(self, cutoff: datetime) -> int:
+        return self._delete(
+            "DELETE FROM presence_cells WHERE mode = ? AND bucket_start < ?",
+            [LIVE, cutoff - PRESENCE_BUCKET],
+        )
+
+    def delete_replay_stored_before(self, cutoff: datetime) -> int:
+        return sum(
+            self._delete(f"DELETE FROM {table} WHERE mode <> ? AND stored_at < ?", [LIVE, cutoff])
+            for table in ("occupancy_metrics", "event_metrics", "presence_cells")
+        )
+
+    def _delete(self, statement: str, parameters: list) -> int:
+        return self._connection.execute(statement, parameters).fetchone()[0]
 
     def zone_exists(self, zone_id: str) -> bool:
         row = self._connection.execute(

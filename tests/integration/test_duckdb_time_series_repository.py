@@ -165,3 +165,62 @@ def test_deve_consultar_series_com_filtros_opcionais():
     assert [m.event_type for m in repository.query_event_series(day, "1h")] == ["A", "B"]
     assert [m.count for m in repository.query_event_series(day, "1h", zone_id="z")] == [1]
     assert repository.zone_exists("vaga-12") and not repository.zone_exists("vaga-99")
+
+
+def test_expurgo_live_usa_o_fim_da_janela_e_o_de_replay_usa_quando_foi_gravado():
+    stored = [datetime(2026, 10, 21, 12)]
+    repository = DuckDBTimeSeriesRepository(":memory:", clock=lambda: stored[0])
+    old = TimeWindow(start_time=datetime(2026, 10, 1, 10), end_time=datetime(2026, 10, 1, 10, 1))
+    recent = TimeWindow(start_time=datetime(2026, 10, 21, 10), end_time=datetime(2026, 10, 21, 10, 1))
+
+    def metric(window):
+        return OccupancyMetric(zone_id="vaga-12", window=window, dwell_time_avg=1.0, occupancy_peak=1, total_count=1)
+
+    repository.save_occupancy_metric(metric(old), "1m")
+    repository.save_occupancy_metric(metric(recent), "1m")
+    repository.save_event_metric(EventMetric(event_type="A", window=old, count=1, uncertain_count=0), "1m")
+    # Replay de uma gravação antiga, gravado hoje: não pode expirar pelo tempo de captura.
+    repository.save_occupancy_metric(metric(old), "1m", mode="REPLAY", session_id="r-1")
+
+    removed = repository.delete_live_metrics_before("1m", datetime(2026, 10, 14, 12))
+
+    assert removed == 2
+    period = TimeWindow(start_time=datetime(2026, 9, 1), end_time=datetime(2026, 11, 1))
+    assert [m.window for m in repository.query_zone_series(period, "1m")] == [recent]
+    assert len(repository.query_zone_series(period, "1m", mode="REPLAY")) == 1
+
+    assert repository.delete_replay_stored_before(datetime(2026, 10, 21, 11)) == 0
+    assert repository.delete_replay_stored_before(datetime(2026, 10, 21, 13)) == 1
+
+
+def test_expurgo_de_presenca_apaga_so_minutos_ja_encerrados_antes_do_corte():
+    repository = DuckDBTimeSeriesRepository(":memory:")
+
+    def key(minute):
+        return PresenceKey("s-1", "METERS", "patio-1", "person", 1, 1, datetime(2026, 10, 7, 12, minute))
+
+    repository.save_presence([(key(0), 1.0, "LIVE"), (key(1), 1.0, "LIVE")])
+
+    # O minuto 12:00 termina às 12:01, então só ele expira com corte em 12:01:30.
+    assert repository.delete_live_presence_before(datetime(2026, 10, 7, 12, 1, 30)) == 1
+
+
+def test_banco_sem_stored_at_recebe_a_coluna_com_o_instante_da_migracao(tmp_path):
+    database_path = str(tmp_path / "sem_stored_at.db")
+    legacy = duckdb.connect(database_path)
+    legacy.execute(
+        "CREATE TABLE presence_cells (mode VARCHAR, session_id VARCHAR, space_kind VARCHAR, space_key VARCHAR,"
+        " object_class VARCHAR, cell_x INTEGER, cell_y INTEGER, bucket_start TIMESTAMP, seconds DOUBLE)"
+    )
+    legacy.execute(
+        "INSERT INTO presence_cells VALUES ('REPLAY', 'r', 'METERS', 'p', 'person', 1, 1, ?, 2.0)",
+        [datetime(2026, 10, 1)],
+    )
+    legacy.close()
+
+    repository = DuckDBTimeSeriesRepository(database_path, clock=lambda: datetime(2026, 10, 21, 12))
+    hour = TimeWindow(start_time=datetime(2026, 10, 1), end_time=datetime(2026, 10, 1, 1))
+
+    assert repository.delete_replay_stored_before(datetime(2026, 10, 21, 11)) == 0
+    assert repository.query_presence("METERS", "p", hour, mode="REPLAY") == [(1, 1, 2.0)]
+    assert repository.delete_replay_stored_before(datetime(2026, 10, 21, 13)) == 1

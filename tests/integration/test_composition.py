@@ -49,3 +49,13 @@ def test_s5_montado_pela_composicao_ingere_publica_e_responde_pelo_barramento():
     [heatmap_reply] = published["ods.s5.heatmap.reply"]
     assert heatmap_reply["payload"]["origin"] == [3.0, 7.0]
     assert heatmap_reply["payload"]["cells"] == [[1]]
+
+
+def test_s5_montado_pela_composicao_tem_expurgo_com_a_politica_padrao():
+    bus = InMemoryB3EventConsumer()
+    service = build_s5(bus, bus, DuckDBTimeSeriesRepository(":memory:"))
+
+    removed = service.purge.execute(datetime(2026, 10, 21, 12))
+
+    assert removed == {"metrics_1m": 0, "metrics_15m": 0, "metrics_1h": 0, "metrics_1d": 0, "presence": 0, "replay": 0}
+

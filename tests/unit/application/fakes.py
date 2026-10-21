@@ -14,6 +14,7 @@ class FakeTimeSeriesRepository(ITimeSeriesRepository):
         self.saved_modes: list[tuple[str, str | None]] = []
         self.saved_event_metrics: list[tuple[EventMetric, str]] = []
         self.saved_presence: list[tuple[PresenceKey, float, str]] = []
+        self.purge_calls: list[tuple[str, str | None, object]] = []
 
     def save_occupancy_metric(
         self, metric: OccupancyMetric, granularity: str, mode: str = LIVE, session_id: str | None = None
@@ -58,6 +59,18 @@ class FakeTimeSeriesRepository(ITimeSeriesRepository):
             for metric, saved_granularity in self.saved_event_metrics
             if saved_granularity == granularity and event_type in (None, metric.event_type)
         ]
+
+    def delete_live_metrics_before(self, granularity, cutoff):
+        self.purge_calls.append(("metrics", granularity, cutoff))
+        return 0
+
+    def delete_live_presence_before(self, cutoff):
+        self.purge_calls.append(("presence", None, cutoff))
+        return 0
+
+    def delete_replay_stored_before(self, cutoff):
+        self.purge_calls.append(("replay", None, cutoff))
+        return 0
 
     def zone_exists(self, zone_id: str) -> bool:
         return any(metric.zone_id == zone_id for metric, _ in self.saved_metrics)

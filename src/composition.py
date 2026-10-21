@@ -19,12 +19,14 @@ from src.application.use_cases.close_metric_windows_use_case import (
 )
 from src.application.use_cases.handle_bus_message_use_case import HandleBusMessageUseCase
 from src.application.use_cases.ingest_envelope_use_case import IngestEnvelopeUseCase
+from src.application.use_cases.purge_expired_data_use_case import PurgeExpiredDataUseCase
 from src.application.use_cases.query_heatmap_use_case import QueryHeatmapUseCase
 from src.application.use_cases.query_metrics_use_case import QueryMetricsUseCase
 from src.domain.repositories.i_time_series_repository import ITimeSeriesRepository
 from src.domain.services.aggregation_strategy import ZoneOccupancyAggregationStrategy
 from src.domain.services.event_metrics_aggregation import EventMetricsAggregation
 from src.domain.services.message_deduplicator import MessageDeduplicator
+from src.domain.value_objects.retention_policy import RetentionPolicy
 from src.infrastructure.b3_bus.b3_event_consumer import B3EventConsumer
 from src.infrastructure.b3_bus.s5_subscriptions import subscribe_s5
 from src.infrastructure.workers.metrics_window_worker import MetricsWindowWorker
@@ -37,10 +39,12 @@ HEATMAP_QUERY_SCHEMA = "ods.s5.heatmap.query"
 
 
 class S5Service:
-    """O S5 montado: o worker fecha as janelas; o resto reage ao barramento."""
+    """O S5 montado: o worker fecha as janelas, purge apaga o que expirou e o resto reage
+    ao barramento. O chamador dispara os dois periodicamente."""
 
     buffer: MetricsBuffer
     worker: MetricsWindowWorker
+    purge: PurgeExpiredDataUseCase
 
 
 def build_s5(
@@ -49,9 +53,10 @@ def build_s5(
     repository: ITimeSeriesRepository,
     clock: Callable[[], datetime] | None = None,
     granularities: tuple[str, ...] = DEFAULT_GRANULARITIES,
+    retention: RetentionPolicy | None = None,
 ) -> S5Service:
     """Assina os tópicos de entrada e de consulta e devolve o worker de fechamento de
-    janelas, que o chamador dispara periodicamente (ex.: a cada 5 s)."""
+    janelas (disparar a cada poucos segundos) e o expurgo (disparar a cada hora)."""
     factory = OutgoingEnvelopeFactory()
     buffer = MetricsBuffer()
 
@@ -77,4 +82,5 @@ def build_s5(
         granularities=granularities,
     )
     worker = MetricsWindowWorker(close_windows, clock) if clock else MetricsWindowWorker(close_windows)
-    return S5Service(buffer=buffer, worker=worker)
+    purge = PurgeExpiredDataUseCase(repository, retention or RetentionPolicy())
+    return S5Service(buffer=buffer, worker=worker, purge=purge)

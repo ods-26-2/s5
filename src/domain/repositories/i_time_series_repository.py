@@ -1,4 +1,5 @@
 from abc import ABC, abstractmethod
+from datetime import datetime
 
 from src.domain.entities.event_metric import EventMetric
 from src.domain.entities.occupancy_metric import OccupancyMetric
@@ -65,6 +66,19 @@ class ITimeSeriesRepository(ABC):
         object_class: str | None = None,
         mode: str = LIVE,
     ) -> list[EventMetric]: ...
+
+    @abstractmethod
+    def delete_live_metrics_before(self, granularity: str, cutoff: datetime) -> int:
+        """Apaga métricas LIVE por zona e por tipo de evento cuja janela terminou antes de
+        `cutoff`; devolve quantas linhas saíram."""
+
+    @abstractmethod
+    def delete_live_presence_before(self, cutoff: datetime) -> int:
+        """Apaga presença LIVE de minutos que terminaram antes de `cutoff`."""
+
+    @abstractmethod
+    def delete_replay_stored_before(self, cutoff: datetime) -> int:
+        """Apaga tudo o que veio de replay e foi gravado antes de `cutoff`."""
 
     @abstractmethod
     def zone_exists(self, zone_id: str) -> bool:
