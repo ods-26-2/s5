@@ -1,0 +1,46 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:ods:s5:ods.s5.metrics.reply",
+  "title": "ods.s5.metrics.reply",
+  "description": "Reply do S5 a ods.s5.metrics.query. Perfil RPL; correlation_id é o message_id da consulta. A série vem em ordem cronológica, com no máximo 1000 pontos.",
+  "allOf": [{ "$ref": "urn:ods:s5:defs#/$defs/rpl" }],
+  "properties": {
+    "schema": { "const": "ods.s5.metrics.reply" },
+    "producer": { "const": "S5" },
+    "payload": {
+      "oneOf": [
+        {
+          "type": "object",
+          "required": ["status", "series"],
+          "properties": {
+            "status": { "const": "OK" },
+            "series": {
+              "type": "array",
+              "maxItems": 1000,
+              "items": {
+                "anyOf": [
+                  { "$ref": "urn:ods:s5:defs#/$defs/zoneMetricsPayload" },
+                  { "$ref": "urn:ods:s5:defs#/$defs/eventMetricsPayload" }
+                ]
+              }
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": ["status", "error"],
+          "properties": {
+            "status": { "const": "ERROR" },
+            "error": {
+              "allOf": [{ "$ref": "urn:ods:s5:defs#/$defs/error" }],
+              "properties": { "code": { "enum": ["INVALID_QUERY", "PERIOD_TOO_LONG", "UNKNOWN_ZONE"] } }
+            }
+          },
+          "additionalProperties": false
+        }
+      ]
+    }
+  },
+  "unevaluatedProperties": false
+}

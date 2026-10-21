@@ -1,0 +1,29 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:ods:s5:ods.s5.metrics.query",
+  "title": "ods.s5.metrics.query",
+  "description": "Consulta da série histórica de métricas, enviada pelas aplicações ao S5. Perfil CMD. Regras que o schema não expressa, verificadas pelo S5: o período tem no máximo 1000 janelas da granularidade (PERIOD_TOO_LONG) e period_start_at é anterior a period_end_at (INVALID_QUERY).",
+  "allOf": [{ "$ref": "urn:ods:s5:defs#/$defs/cmd" }],
+  "properties": {
+    "message_type": { "const": "query" },
+    "schema": { "const": "ods.s5.metrics.query" },
+    "target": { "const": "S5" },
+    "payload": {
+      "type": "object",
+      "required": ["metric", "period_start_at", "period_end_at", "granularity"],
+      "properties": {
+        "metric": { "enum": ["ZONE", "EVENT"] },
+        "zone_id": { "$ref": "urn:ods:s5:defs#/$defs/nonEmptyString" },
+        "event_type": { "type": "string", "pattern": "^[A-Z][A-Z0-9_]*$" },
+        "class": { "$ref": "urn:ods:s5:defs#/$defs/nonEmptyString" },
+        "period_start_at": { "$ref": "urn:ods:s5:defs#/$defs/datetime" },
+        "period_end_at": { "$ref": "urn:ods:s5:defs#/$defs/datetime" },
+        "granularity": { "$ref": "urn:ods:s5:defs#/$defs/granularity" }
+      },
+      "additionalProperties": false,
+      "if": { "properties": { "metric": { "const": "ZONE" } } },
+      "then": { "not": { "required": ["event_type"] } }
+    }
+  },
+  "unevaluatedProperties": false
+}

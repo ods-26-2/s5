@@ -1,0 +1,20 @@
+{
+  "message_type": "event",
+  "message_id": "b2c3d4e5-f607-4b8c-9d0e-1f2a3b4c5d6e",
+  "schema": "ods.s5.event_metrics",
+  "schema_version": "1.0",
+  "producer": "S5",
+  "published_at": "2026-09-23T15:00:02.010Z",
+  "captured_at": "2026-09-23T15:00:00.000Z",
+  "session_id": "9c2a1f3e-4d5b-4c6a-9e8f-0a1b2c3d4e5f",
+  "sequence": 18,
+  "artifact_version": "rules-a5-3",
+  "payload": {
+    "event_type": "PPE_NON_COMPLIANT",
+    "window_start_at": "2026-09-23T14:00:00.000Z",
+    "window_end_at": "2026-09-23T15:00:00.000Z",
+    "granularity": "1h",
+    "count": 4,
+    "uncertain_count": 1
+  }
+}

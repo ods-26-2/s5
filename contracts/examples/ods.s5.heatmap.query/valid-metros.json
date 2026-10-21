@@ -1,0 +1,16 @@
+{
+  "message_type": "query",
+  "message_id": "8293a4b5-c6d7-4142-9d5e-7f8091a2b3c4",
+  "schema": "ods.s5.heatmap.query",
+  "schema_version": "1.0",
+  "producer": "A3",
+  "target": "S5",
+  "published_at": "2026-09-23T15:00:00.000Z",
+  "payload": {
+    "space_id": "patio-1",
+    "class": "person",
+    "period_start_at": "2026-09-23T14:00:00.000Z",
+    "period_end_at": "2026-09-23T15:00:00.000Z",
+    "cell_size_m": 0.5
+  }
+}

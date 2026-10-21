@@ -29,6 +29,11 @@ from src.domain.services.message_deduplicator import MessageDeduplicator
 from src.domain.value_objects.retention_policy import RetentionPolicy
 from src.infrastructure.b3_bus.b3_event_consumer import B3EventConsumer
 from src.infrastructure.b3_bus.s5_subscriptions import subscribe_s5
+from src.infrastructure.contracts.contract_validator import (
+    ContractValidator,
+    ValidatingPublisher,
+    ViolationCallback,
+)
 from src.infrastructure.workers.metrics_window_worker import MetricsWindowWorker
 
 METRICS_QUERY_SCHEMA = "ods.s5.metrics.query"
@@ -54,9 +59,17 @@ def build_s5(
     clock: Callable[[], datetime] | None = None,
     granularities: tuple[str, ...] = DEFAULT_GRANULARITIES,
     retention: RetentionPolicy | None = None,
+    on_contract_violation: ViolationCallback | None = None,
 ) -> S5Service:
     """Assina os tópicos de entrada e de consulta e devolve o worker de fechamento de
-    janelas (disparar a cada poucos segundos) e o expurgo (disparar a cada hora)."""
+    janelas (disparar a cada poucos segundos) e o expurgo (disparar a cada hora).
+
+    Tudo o que o S5 publica passa pelo validador de contratos antes de chegar ao
+    barramento. Mensagem fora do contrato é descartada e vai para `on_contract_violation`
+    (por padrão, o log de erro); os testes passam uma função que lança a exceção.
+    """
+    validator_options = {"on_violation": on_contract_violation} if on_contract_violation else {}
+    publisher = ValidatingPublisher(publisher, ContractValidator(), **validator_options)
     factory = OutgoingEnvelopeFactory()
     buffer = MetricsBuffer()
 

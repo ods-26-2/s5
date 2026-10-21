@@ -65,6 +65,16 @@ class UnsupportedSchemaError(ApplicationError):
     """Lançado quando chega uma mensagem de um schema que o S5 não consome."""
 
 
+class ContractViolationError(ApplicationError):
+    """Lançado quando uma mensagem não segue o JSON Schema do seu contrato, ou quando não
+    há contrato para o schema que ela declara."""
+
+    def __init__(self, schema: str | None, problems: list[str]) -> None:
+        super().__init__(f"{schema}: {'; '.join(problems)}")
+        self.schema = schema
+        self.problems = problems
+
+
 class QueryRejectedError(ApplicationError):
     """Lançado quando uma consulta é recusada; code vai no error da reply (regra 6)."""
 

@@ -1,0 +1,13 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:ods:s5:ods.s5.event_metrics",
+  "title": "ods.s5.event_metrics",
+  "description": "Evento publicado pelo S5 ao fechar cada janela, uma mensagem por tipo de evento, zona e classe com ocorrência. Perfil EV-SERVIÇO; artifact_version, quando presente, é a versão do artefato RULES do S2.",
+  "allOf": [{ "$ref": "urn:ods:s5:defs#/$defs/evServico" }],
+  "properties": {
+    "schema": { "const": "ods.s5.event_metrics" },
+    "producer": { "const": "S5" },
+    "payload": { "$ref": "urn:ods:s5:defs#/$defs/eventMetricsPayload" }
+  },
+  "unevaluatedProperties": false
+}

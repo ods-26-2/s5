@@ -4,6 +4,7 @@
 # Execução
 duckdb==1.5.6
 fastapi==0.143.0
+jsonschema==4.23.0
 uvicorn==0.54.0
 
 # Testes

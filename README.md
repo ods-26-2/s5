@@ -15,26 +15,29 @@ s5/
 ├── README.md                   # Documentação do componente
 ├── app.py                      # Ponto de entrada do serviço (uvicorn app:app)
 ├── seed.py                     # Dados de exemplo para a API de depuração
-├── requirements.txt            # Dependências (pytest, duckdb, fastapi, uvicorn, httpx)
+├── requirements.txt            # Dependências com versões fixadas
 ├── pytest.ini                  # Configuração dos testes (pythonpath = .)
+├── contracts/                  # JSON Schemas e exemplos das mensagens do S5
 ├── src/
 │   ├── domain/                 # 1. Coração do negócio (zero dependências externas)
 │   │   ├── entities/           # ZoneTransition, ZoneOccupancySample, PositionSample, QualifiedEvent,
 │   │   │                       #   SessionStart, ReplayState, OccupancyMetric, EventMetric
-│   │   ├── value_objects/      # Envelope, TimeWindow, granularidades e janelas alinhadas
+│   │   ├── value_objects/      # Envelope, TimeWindow, granularidades, janelas alinhadas,
+│   │   │                       #   RetentionPolicy
 │   │   ├── repositories/       # Contrato ITimeSeriesRepository
 │   │   ├── services/           # MessageDeduplicator, AggregationStrategy, EventMetricsAggregation,
 │   │   │                       #   PresenceAccumulator
 │   │   └── exceptions/         # Hierarquia de exceções (DomainError, ApplicationError)
 │   ├── application/            # 2. Orquestração de casos de uso
 │   │   ├── use_cases/          # IngestEnvelope, HandleBusMessage, CloseMetricWindows,
-│   │   │                       #   AnswerQuery, QueryMetrics, QueryHeatmap
+│   │   │                       #   AnswerQuery, QueryMetrics, QueryHeatmap, PurgeExpiredData
 │   │   ├── parsers/            # Leitura do envelope comum de 13 campos
 │   │   ├── messaging/          # Envelopes EV-SERVIÇO e RPL e payloads das métricas
 │   │   ├── ports/              # IEventPublisher (publicação no B3)
 │   │   └── state/              # MetricsBuffer (mensagens das janelas abertas e sessão)
 │   ├── infrastructure/         # 3. Adaptadores e integrações externas
 │   │   ├── b3_bus/             # Consumidor/publicador do B3 (contrato + in-memory) e assinaturas do S5
+│   │   ├── contracts/          # ContractValidator e ValidatingPublisher
 │   │   ├── database/           # DuckDBTimeSeriesRepository
 │   │   └── workers/            # MetricsWindowWorker
 │   ├── presentation/           # 4. Exposição de API
@@ -42,6 +45,7 @@ s5/
 │   └── composition.py          # Monta o S5 completo sobre um barramento e um repositório
 └── tests/
     ├── fixtures/               # Mensagens de exemplo da Especificação 1.0
+    ├── contract/               # Exemplos de contracts/ contra os schemas
     ├── unit/                   # Domínio e casos de uso (com fakes em memória)
     └── integration/            # DuckDB real, HTTP (TestClient), B3 in-memory, composição
 ```
@@ -168,7 +172,9 @@ O `InMemoryB3EventConsumer` implementa os contratos `B3EventConsumer` e `IEventP
 }
 ```
 
-O `MetricsBuffer` descarta o que ficou mais de um dia antes da última janela fechada. Ele preserva a última amostra de ocupação de cada zona e os eventos do S2 ainda não encerrados.
+O `MetricsBuffer` descarta o que ficou mais de um dia antes da última janela fechada. Ele preserva a última amostra de ocupação de cada zona, que é a contagem vigente no início da próxima janela. Um evento do S2 fica inteiro enquanto alguma publicação dele for recente; quando nem a última é, ele sai, tenha ou não recebido `ENDED`.
+
+Antes de publicar, toda mensagem passa pelo validador de contratos (`ValidatingPublisher`, schemas em [`contracts/`](contracts/README.md)). Mensagem fora do contrato não chega ao barramento: é descartada e registrada no log de erro.
 
 Cada granularidade é calculada direto dos dados brutos do buffer, sem rollup de uma granularidade fina para outra: assim a média de permanência de 1h, por exemplo, é a média das saídas da hora, e não a média das médias de cada minuto.
 
@@ -194,7 +200,7 @@ Consulta com `space_id` + `cell_size_m`, ou `source_id` + `cell_size_px` em inst
   "period_end_at": "2026-09-23T15:00:00.000Z", "cell_size_m": 0.5 }
 ```
 
-- As células finas são agrupadas no tamanho pedido, que precisa ser pelo menos a resolução base.
+- As células finas são agrupadas no tamanho pedido, que precisa ser múltiplo da resolução base (ex.: 0,5 m ou 20 px). Outro tamanho → `INVALID_QUERY`.
 - A grade cobre só o retângulo com presença: `origin` é o canto da primeira célula, e `cells[y][x]` são segundos de presença, inteiros.
 - Sem presença no período, a reply traz uma grade vazia.
 - Grade maior que 200×200 → `GRID_TOO_LARGE`. A especificação prevê entregá-la por `heatmap_uri`, mas o S5 ainda não tem onde guardar o arquivo.
@@ -225,15 +231,30 @@ Consulta com `space_id` + `cell_size_m`, ou `source_id` + `cell_size_px` em inst
 
 | Tabela | Colunas |
 | :--- | :--- |
-| `occupancy_metrics` | `zone_id`, `granularity`, `start_time`, `end_time`, `dwell_time_avg`, `occupancy_peak`, `total_count`, `occupancy_avg`, `mode`, `session_id` |
-| `event_metrics` | `event_type`, `zone_id`, `object_class`, `granularity`, `start_time`, `end_time`, `count`, `uncertain_count`, `duration_avg_ms`, `mode`, `session_id` |
-| `presence_cells` | `mode`, `session_id`, `space_kind`, `space_key`, `object_class`, `cell_x`, `cell_y`, `bucket_start`, `seconds` |
+| `occupancy_metrics` | `zone_id`, `granularity`, `start_time`, `end_time`, `dwell_time_avg`, `occupancy_peak`, `total_count`, `occupancy_avg`, `mode`, `session_id`, `stored_at` |
+| `event_metrics` | `event_type`, `zone_id`, `object_class`, `granularity`, `start_time`, `end_time`, `count`, `uncertain_count`, `duration_avg_ms`, `mode`, `session_id`, `stored_at` |
+| `presence_cells` | `mode`, `session_id`, `space_kind`, `space_key`, `object_class`, `cell_x`, `cell_y`, `bucket_start`, `seconds`, `stored_at` |
 
 Os nomes de coluna são internos. Para fora, por barramento ou pela API de depuração, as métricas saem sempre com os campos da Especificação 1.0 (`dwell_avg_s`, `window_start_at` etc.).
 
 Cada métrica é gravada com o `mode` (`LIVE` ou `REPLAY`) e o `session_id` que a produziram. Um replay reproduz o tempo de captura original, então as janelas dele coincidem com as da captura ao vivo daquele dia. Por isso as consultas leem só `LIVE`, e um replay não duplica o histórico.
 
-Bancos criados antes de `occupancy_avg`, `mode` e `session_id` existirem recebem as colunas na abertura, com `0` e `LIVE` nas linhas já gravadas.
+Toda linha guarda também `stored_at`, o instante UTC em que foi gravada.
+
+**Retenção** (`RetentionPolicy`, `PurgeExpiredDataUseCase`): o expurgo roda a cada `S5_PURGE_SECONDS` (padrão 3600) e apaga o que passou do prazo.
+
+| Dado | Expira pelo | Prazo padrão |
+| :--- | :--- | :--- |
+| Métricas LIVE de 1m | fim da janela | 7 dias |
+| Métricas LIVE de 15m | fim da janela | 90 dias |
+| Métricas LIVE de 1h | fim da janela | 365 dias |
+| Métricas LIVE de 1d | fim da janela | 1825 dias |
+| Presença LIVE por célula | fim do minuto | 14 dias |
+| Tudo o que veio de replay | `stored_at` | 7 dias |
+
+Dados de replay expiram pelo momento em que foram gravados, porque o tempo de captura deles é o da gravação reproduzida, que pode ser de dias atrás. Os prazos são provisórios, até o orçamento de disco da Jetson ser fechado com o SIS-1 (P3).
+
+Bancos criados antes de `occupancy_avg`, `mode`, `session_id` e `stored_at` existirem recebem as colunas na abertura: `0` em `occupancy_avg`, `LIVE` em `mode` e o instante da migração em `stored_at`.
 
 **API REST de depuração** (`create_metrics_query_router(repository)`, prefixo `/api/v5`). As aplicações consultam o S5 pelo barramento (S5.3). A API executa os mesmos casos de uso das consultas, com os mesmos parâmetros (como query string), o mesmo formato de resposta e os mesmos códigos de erro, para inspecionar o banco durante o desenvolvimento:
 
@@ -258,15 +279,16 @@ pip install -r requirements.txt
 ### Testes
 
 ```bash
-pytest            # suíte completa
-pytest tests/unit # somente testes unitários
+pytest                # suíte completa
+pytest tests/unit     # somente testes unitários
+pytest tests/contract # somente os exemplos de contracts/
 ```
 
-Os testes unitários usam fakes em memória ([`tests/unit/application/fakes.py`](tests/unit/application/fakes.py)). Os de integração usam DuckDB real (`:memory:`), o `TestClient` do FastAPI e o consumidor B3 em memória.
+Os testes unitários usam fakes em memória ([`tests/unit/application/fakes.py`](tests/unit/application/fakes.py)). Os de integração usam DuckDB real (`:memory:`), o `TestClient` do FastAPI e o consumidor B3 em memória. Os de contrato verificam cada exemplo de [`contracts/examples/`](contracts/examples) contra o seu schema.
 
 ### Subindo a API
 
-O ponto de entrada é [`app.py`](app.py). Ele monta o S5 completo por `build_s5` ([`composition.py`](src/composition.py)) sobre o barramento em memória e um `DuckDBTimeSeriesRepository`, fecha as janelas a cada `S5_TICK_SECONDS` (padrão 5) e expõe a API de depuração. Enquanto não houver cliente de broker real, mensagens só chegam de dentro do processo. O banco padrão é `s5_metrics.db`; para usar outro caminho (ou `:memory:`), defina `S5_DATABASE_PATH`.
+O ponto de entrada é [`app.py`](app.py). Ele monta o S5 completo por `build_s5` ([`composition.py`](src/composition.py)) sobre o barramento em memória e um `DuckDBTimeSeriesRepository`, fecha as janelas a cada `S5_TICK_SECONDS` (padrão 5), roda o expurgo de retenção a cada `S5_PURGE_SECONDS` (padrão 3600) e expõe a API de depuração. Enquanto não houver cliente de broker real, mensagens só chegam de dentro do processo. O banco padrão é `s5_metrics.db`; para usar outro caminho (ou `:memory:`), defina `S5_DATABASE_PATH`.
 
 ```bash
 uvicorn app:app --reload
@@ -288,12 +310,13 @@ curl "http://localhost:8000/api/v5/heatmap?space_id=patio-1&cell_size_m=0.5&$P"
 
 | Verificação | Resultado |
 | :--- | :--- |
-| `pytest` (unitários + integração) | 167/167 aprovados |
+| `pytest` (unitários, integração e contrato) | 228/228 aprovados |
 | Invariantes de domínio | Janelas invertidas, IDs vazios, contagens negativas, enums fora do contrato, coordenadas não finitas, envelopes fora do contrato e `EXIT` sem `dwell_s` lançam exceções específicas de `DomainError` |
 | Contrato de entrada | Exemplos de `ods.s1.zone_transition`, `ods.s1.zone_occupancy`, `ods.s1.position`, `ods.s2.event`, `ods.session.started` e `ods.p6.replay.state` da Especificação 1.0, deduplicação por `message_id` e regra de MAJOR.MINOR |
 | Contrato de saída | `ods.s5.zone_metrics` e `ods.s5.event_metrics` com envelope EV-SERVIÇO; fluxo de ponta a ponta pelo barramento em memória |
 | Sessão e replay | Reinício do estado por `ods.session.started`, relógio de captura em replay, pausa, `LOOP` com nova sessão e separação LIVE/REPLAY no DuckDB |
 | Consultas | `ods.s5.metrics.query` e `ods.s5.heatmap.query` com os exemplos da especificação, códigos de erro, reply RPL e ciclo completo pelo barramento em memória |
-| Persistência DuckDB | Séries por zona e por tipo de evento, presença por célula, separação LIVE/REPLAY e migração de bancos antigos |
+| Persistência DuckDB | Séries por zona e por tipo de evento, presença por célula, separação LIVE/REPLAY, expurgo por prazo e migração de bancos antigos |
+| Contratos | 34 exemplos válidos e inválidos dos 6 contratos do S5; tudo o que o S5 publica passa pelo validador, inclusive replies de erro |
 | API HTTP | Rotas `/api/v5/metrics` e `/api/v5/heatmap` testadas via `TestClient` e com `uvicorn` sobre os dados do `seed.py` |
 | Composição | S5 montado por `build_s5` ingere, publica e responde a consultas pelo barramento em memória |

@@ -1,0 +1,31 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:ods:s5:ods.s5.heatmap.query",
+  "title": "ods.s5.heatmap.query",
+  "description": "Consulta do mapa de calor, enviada pelas aplicações ao S5. Perfil CMD. Em metros, space_id com cell_size_m; em instalação sem calibração, source_id com cell_size_px. O tamanho da célula deve ser múltiplo da resolução base (0,1 m ou 10 px); o S5 verifica e responde INVALID_QUERY.",
+  "allOf": [{ "$ref": "urn:ods:s5:defs#/$defs/cmd" }],
+  "properties": {
+    "message_type": { "const": "query" },
+    "schema": { "const": "ods.s5.heatmap.query" },
+    "target": { "const": "S5" },
+    "payload": {
+      "type": "object",
+      "required": ["period_start_at", "period_end_at"],
+      "properties": {
+        "space_id": { "$ref": "urn:ods:s5:defs#/$defs/nonEmptyString" },
+        "cell_size_m": { "type": "number", "exclusiveMinimum": 0 },
+        "source_id": { "$ref": "urn:ods:s5:defs#/$defs/nonEmptyString" },
+        "cell_size_px": { "type": "number", "exclusiveMinimum": 0 },
+        "class": { "$ref": "urn:ods:s5:defs#/$defs/nonEmptyString" },
+        "period_start_at": { "$ref": "urn:ods:s5:defs#/$defs/datetime" },
+        "period_end_at": { "$ref": "urn:ods:s5:defs#/$defs/datetime" }
+      },
+      "additionalProperties": false,
+      "oneOf": [
+        { "required": ["space_id", "cell_size_m"], "not": { "anyOf": [{ "required": ["source_id"] }, { "required": ["cell_size_px"] }] } },
+        { "required": ["source_id", "cell_size_px"], "not": { "anyOf": [{ "required": ["space_id"] }, { "required": ["cell_size_m"] }] } }
+      ]
+    }
+  },
+  "unevaluatedProperties": false
+}

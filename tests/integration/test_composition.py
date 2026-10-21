@@ -15,10 +15,16 @@ from tests.fixtures.spec_examples import (
 )
 
 
+def _fail(message, error):
+    raise error
+
+
 def test_s5_montado_pela_composicao_ingere_publica_e_responde_pelo_barramento():
     bus = InMemoryB3EventConsumer()
     ticks = iter([datetime(2026, 9, 23, 14, 29, 30), datetime(2026, 9, 23, 15, 0, 3)])
-    service = build_s5(bus, bus, DuckDBTimeSeriesRepository(":memory:"), clock=lambda: next(ticks))
+    service = build_s5(
+        bus, bus, DuckDBTimeSeriesRepository(":memory:"), clock=lambda: next(ticks), on_contract_violation=_fail
+    )
     published: dict[str, list[dict]] = {}
     for topic in ("ods.s5.zone_metrics", "ods.s5.event_metrics", "ods.s5.metrics.reply", "ods.s5.heatmap.reply"):
         bus.subscribe(topic, lambda message, topic=topic: published.setdefault(topic, []).append(message))
@@ -59,3 +65,20 @@ def test_s5_montado_pela_composicao_tem_expurgo_com_a_politica_padrao():
 
     assert removed == {"metrics_1m": 0, "metrics_15m": 0, "metrics_1h": 0, "metrics_1d": 0, "presence": 0, "replay": 0}
 
+
+def test_replies_de_erro_e_grade_vazia_tambem_seguem_o_contrato():
+    bus = InMemoryB3EventConsumer()
+    build_s5(bus, bus, DuckDBTimeSeriesRepository(":memory:"), on_contract_violation=_fail)
+    replies = []
+    bus.subscribe("ods.s5.metrics.reply", replies.append)
+    bus.subscribe("ods.s5.heatmap.reply", replies.append)
+    bus.start()
+
+    bus.publish("ods.s5.metrics.query", metrics_query())  # zona sem métricas: UNKNOWN_ZONE
+    bus.publish("ods.s5.heatmap.query", heatmap_query())  # sem presença: grade vazia
+    invalid = heatmap_query()
+    invalid["message_id"] = "0a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d"
+    invalid["payload"]["cell_size_m"] = 0.25
+    bus.publish("ods.s5.heatmap.query", invalid)  # INVALID_QUERY
+
+    assert [r["payload"]["status"] for r in replies] == ["ERROR", "OK", "ERROR"]

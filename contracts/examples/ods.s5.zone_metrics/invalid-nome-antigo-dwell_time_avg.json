@@ -1,0 +1,23 @@
+{
+  "message_type": "event",
+  "message_id": "a1b2c3d4-e5f6-4a7b-8c9d-0e1f2a3b4c5d",
+  "schema": "ods.s5.zone_metrics",
+  "schema_version": "1.0",
+  "producer": "S5",
+  "published_at": "2026-09-23T14:15:02.004Z",
+  "captured_at": "2026-09-23T14:15:00.000Z",
+  "source_id": "cam0",
+  "session_id": "9c2a1f3e-4d5b-4c6a-9e8f-0a1b2c3d4e5f",
+  "sequence": 17,
+  "artifact_version": "zones-a8-2",
+  "payload": {
+    "zone_id": "vaga-12",
+    "window_start_at": "2026-09-23T14:00:00.000Z",
+    "window_end_at": "2026-09-23T14:15:00.000Z",
+    "granularity": "15m",
+    "total_count": 3,
+    "occupancy_peak": 1,
+    "occupancy_avg": 0.72,
+    "dwell_time_avg": 1830.0
+  }
+}

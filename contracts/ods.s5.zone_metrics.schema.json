@@ -1,0 +1,13 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:ods:s5:ods.s5.zone_metrics",
+  "title": "ods.s5.zone_metrics",
+  "description": "Evento publicado pelo S5 ao fechar cada janela, uma mensagem por zona. Perfil EV-SERVIÇO; captured_at é o fim da janela e artifact_version, quando presente, a versão do artefato ZONES.",
+  "allOf": [{ "$ref": "urn:ods:s5:defs#/$defs/evServico" }],
+  "properties": {
+    "schema": { "const": "ods.s5.zone_metrics" },
+    "producer": { "const": "S5" },
+    "payload": { "$ref": "urn:ods:s5:defs#/$defs/zoneMetricsPayload" }
+  },
+  "unevaluatedProperties": false
+}
