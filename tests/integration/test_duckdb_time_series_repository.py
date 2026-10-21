@@ -3,12 +3,9 @@ from datetime import datetime, timedelta
 import duckdb
 
 from src.domain.entities.event_metric import EventMetric
-from src.domain.entities.heatmap_grid import HeatmapGrid
 from src.domain.entities.occupancy_metric import OccupancyMetric
 from src.domain.services.presence_accumulator import PresenceKey
-from src.domain.value_objects.spatial_cell import SpatialCell
 from src.domain.value_objects.time_window import TimeWindow
-from src.domain.value_objects.world_coordinate import WorldCoordinate
 from src.infrastructure.database.duckdb_time_series_repository import DuckDBTimeSeriesRepository
 
 
@@ -22,9 +19,8 @@ def test_deve_persistir_e_consultar_metrica_de_ocupacao_no_duckdb():
     )
 
     repository.save_occupancy_metric(metric, granularity="1m")
-    result = repository.query_metrics(
-        "zone-01", TimeWindow(start_time=base_time, end_time=base_time + timedelta(hours=1)), "1m"
-    )
+    hour = TimeWindow(start_time=base_time, end_time=base_time + timedelta(hours=1))
+    result = repository.query_zone_series(hour, "1m", zone_id="zone-01")
 
     assert len(result) == 1
     assert result[0].zone_id == "zone-01"
@@ -32,29 +28,12 @@ def test_deve_persistir_e_consultar_metrica_de_ocupacao_no_duckdb():
     assert result[0].occupancy_avg == 2.5
 
 
-def test_deve_persistir_e_consultar_celulas_de_heatmap_no_duckdb():
-    repository = DuckDBTimeSeriesRepository(":memory:")
-    timestamp = datetime(2026, 9, 10, 10, 0, 0)
-    grid = HeatmapGrid(
-        grid_id="grid-01",
-        cells=(SpatialCell(position=WorldCoordinate(x=1.0, y=2.0), density=0.8),),
-    )
-
-    repository.save_heatmap_grid(grid, timestamp)
-    result = repository.query_heatmap(
-        "grid-01", TimeWindow(start_time=timestamp - timedelta(seconds=1), end_time=timestamp + timedelta(seconds=1))
-    )
-
-    assert len(result) == 1
-    assert result[0].cells[0].density == 0.8
-
-
 def test_deve_retornar_lista_vazia_quando_nao_houver_metricas_na_janela():
     repository = DuckDBTimeSeriesRepository(":memory:")
     base_time = datetime(2026, 9, 10, 10, 0, 0)
     window = TimeWindow(start_time=base_time, end_time=base_time + timedelta(minutes=1))
 
-    result = repository.query_metrics("zone-01", window, "1m")
+    result = repository.query_zone_series(window, "1m", zone_id="zone-01")
 
     assert result == []
 
@@ -74,9 +53,8 @@ def test_deve_acrescentar_occupancy_avg_em_banco_criado_antes_da_coluna(tmp_path
     legacy.close()
 
     repository = DuckDBTimeSeriesRepository(database_path)
-    result = repository.query_metrics(
-        "zone-01", TimeWindow(start_time=base_time, end_time=base_time + timedelta(hours=1)), "1m"
-    )
+    hour = TimeWindow(start_time=base_time, end_time=base_time + timedelta(hours=1))
+    result = repository.query_zone_series(hour, "1m", zone_id="zone-01")
 
     assert result[0].total_count == 2
     assert result[0].occupancy_avg == 0.0
@@ -94,7 +72,7 @@ def test_deve_persistir_e_consultar_metrica_por_tipo_de_evento_no_duckdb():
         granularity="1h",
     )
 
-    result = repository.query_event_metrics("PPE_NON_COMPLIANT", window, "1h")
+    result = repository.query_event_series(window, "1h", event_type="PPE_NON_COMPLIANT")
 
     assert len(result) == 1
     assert result[0].count == 4
@@ -113,8 +91,8 @@ def test_consulta_padrao_le_so_live_para_que_replay_nao_duplique_o_historico():
     repository.save_occupancy_metric(replay, "1m", mode="REPLAY", session_id="s-replay")
     period = TimeWindow(start_time=base_time, end_time=base_time + timedelta(hours=1))
 
-    assert [m.total_count for m in repository.query_metrics("vaga-12", period, "1m")] == [1]
-    assert [m.total_count for m in repository.query_metrics("vaga-12", period, "1m", mode="REPLAY")] == [5]
+    assert [m.total_count for m in repository.query_zone_series(period, "1m", zone_id="vaga-12")] == [1]
+    assert [m.total_count for m in repository.query_zone_series(period, "1m", zone_id="vaga-12", mode="REPLAY")] == [5]
 
 
 def test_metricas_de_evento_em_replay_ficam_fora_da_consulta_padrao():
@@ -124,8 +102,8 @@ def test_metricas_de_evento_em_replay_ficam_fora_da_consulta_padrao():
     metric = EventMetric(event_type="PPE_NON_COMPLIANT", window=window, count=1, uncertain_count=0)
     repository.save_event_metric(metric, "1h", mode="REPLAY", session_id="s-replay")
 
-    assert repository.query_event_metrics("PPE_NON_COMPLIANT", window, "1h") == []
-    assert len(repository.query_event_metrics("PPE_NON_COMPLIANT", window, "1h", mode="REPLAY")) == 1
+    assert repository.query_event_series(window, "1h", event_type="PPE_NON_COMPLIANT") == []
+    assert len(repository.query_event_series(window, "1h", event_type="PPE_NON_COMPLIANT", mode="REPLAY")) == 1
 
 
 def test_deve_acrescentar_mode_e_session_id_em_event_metrics_criada_sem_elas(tmp_path):
@@ -146,7 +124,7 @@ def test_deve_acrescentar_mode_e_session_id_em_event_metrics_criada_sem_elas(tmp
     repository = DuckDBTimeSeriesRepository(database_path)
     window = TimeWindow(start_time=base_time, end_time=base_time + timedelta(hours=1))
 
-    assert [m.count for m in repository.query_event_metrics("X", window, "1h")] == [2]
+    assert [m.count for m in repository.query_event_series(window, "1h", event_type="X")] == [2]
 
 
 def test_deve_somar_presenca_por_celula_fina_no_periodo_filtrando_classe_e_modo():

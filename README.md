@@ -13,44 +13,40 @@ O projeto adota os princípios de **Clean Architecture**, **Domain-Driven Design
 ```text
 s5/
 ├── README.md                   # Documentação do componente
-├── app.py                      # Ponto de entrada da API (uvicorn app:app)
-├── seed.py                     # Dados de exemplo para testar a API
+├── app.py                      # Ponto de entrada do serviço (uvicorn app:app)
+├── seed.py                     # Dados de exemplo para a API de depuração
 ├── requirements.txt            # Dependências (pytest, duckdb, fastapi, uvicorn, httpx)
 ├── pytest.ini                  # Configuração dos testes (pythonpath = .)
 ├── src/
 │   ├── domain/                 # 1. Coração do negócio (zero dependências externas)
 │   │   ├── entities/           # ZoneTransition, ZoneOccupancySample, PositionSample, QualifiedEvent,
-│   │   │                       #   SessionStart, ReplayState, OccupancyMetric, EventMetric, HeatmapGrid
-│   │   ├── value_objects/      # Envelope, TimeWindow, WorldCoordinate, PixelCoordinate,
-│   │   │                       #   SpatialCell, HomographyMatrix
+│   │   │                       #   SessionStart, ReplayState, OccupancyMetric, EventMetric
+│   │   ├── value_objects/      # Envelope, TimeWindow, granularidades e janelas alinhadas
 │   │   ├── repositories/       # Contrato ITimeSeriesRepository
-│   │   ├── services/           # MessageDeduplicator, AggregationStrategy, PresenceAccumulator,
-│   │   │                       #   MovingWindowGenerator, SpatialCoordinateConverter,
-│   │   │                       #   GridDensityCalculator, DownsamplingService
+│   │   ├── services/           # MessageDeduplicator, AggregationStrategy, EventMetricsAggregation,
+│   │   │                       #   PresenceAccumulator
 │   │   └── exceptions/         # Hierarquia de exceções (DomainError, ApplicationError)
-│   ├── application/            # 2. Orquestração de casos de uso e DTOs
+│   ├── application/            # 2. Orquestração de casos de uso
 │   │   ├── use_cases/          # IngestEnvelope, HandleBusMessage, CloseMetricWindows,
-│   │   │                       #   AnswerQuery, QueryMetrics, QueryHeatmap,
-│   │   │                       #   AggregateZoneMetrics, GenerateHeatmap, RollupMetrics
+│   │   │                       #   AnswerQuery, QueryMetrics, QueryHeatmap
 │   │   ├── parsers/            # Leitura do envelope comum de 13 campos
 │   │   ├── messaging/          # Envelopes EV-SERVIÇO e RPL e payloads das métricas
 │   │   ├── ports/              # IEventPublisher (publicação no B3)
-│   │   ├── state/              # MetricsBuffer (mensagens das janelas abertas)
-│   │   └── dtos/               # OccupancyMetricDTO, HeatmapQueryDTO
+│   │   └── state/              # MetricsBuffer (mensagens das janelas abertas e sessão)
 │   ├── infrastructure/         # 3. Adaptadores e integrações externas
 │   │   ├── b3_bus/             # Consumidor/publicador do B3 (contrato + in-memory) e assinaturas do S5
 │   │   ├── database/           # DuckDBTimeSeriesRepository
-│   │   ├── i3_calibration/     # Carregador da matriz de homografia (JSON)
-│   │   └── workers/            # MetricsWindowWorker, DownsamplingRollupWorker
-│   └── presentation/           # 4. Exposição de API
-│       └── http/               # Router FastAPI (/api/v5)
+│   │   └── workers/            # MetricsWindowWorker
+│   ├── presentation/           # 4. Exposição de API
+│   │   └── http/               # Router FastAPI de depuração (/api/v5)
+│   └── composition.py          # Monta o S5 completo sobre um barramento e um repositório
 └── tests/
     ├── fixtures/               # Mensagens de exemplo da Especificação 1.0
     ├── unit/                   # Domínio e casos de uso (com fakes em memória)
-    └── integration/            # DuckDB real, HTTP (TestClient), B3 in-memory, calibração
+    └── integration/            # DuckDB real, HTTP (TestClient), B3 in-memory, composição
 ```
 
-A regra de dependência é estrita: `domain` não importa nada de fora; `application` só conhece `domain`; `infrastructure` e `presentation` implementam os contratos definidos no domínio.
+A regra de dependência é estrita: `domain` não importa nada de fora; `application` só conhece `domain`; `infrastructure` e `presentation` implementam os contratos definidos no domínio e na aplicação. `composition.py` é a raiz de composição: fica fora das camadas porque conhece todas elas.
 
 ---
 
@@ -63,18 +59,18 @@ Conforme definido em [`docs/responsability.md`](../docs/responsability.md):
 | **S5.1 — Ingestor de Eventos B3** | Consumo Pub/Sub do B3, leitura do envelope comum, deduplicação por `message_id` e conversão de `ods.s1.zone_transition`, `ods.s1.zone_occupancy`, `ods.s1.position`, `ods.s2.event`, `ods.session.started` e `ods.p6.replay.state`; reinício do estado a cada sessão. | Event Consumer + Deduplicator | Rafael Castro |
 | **S5.2 — Motor de Agregação** | Métricas por zona (permanência, pico e média de ocupação, entradas) e por tipo de evento em janelas alinhadas de 1m, 15m, 1h e 1d, publicadas em `ods.s5.zone_metrics` e `ods.s5.event_metrics`. | Time Window Engine + Aggregator Strategy | Rafael Castro |
 | **S5.3 — Mapa de Calor e Consultas** | Segundos de presença por célula a partir de `ods.s1.position`; respostas a `ods.s5.metrics.query` e `ods.s5.heatmap.query`. | Presence Accumulator + Request/Reply | Rafael Castro |
-| **S5.4 — Time-Series Store (DuckDB)** | Armazenamento colunar OLAP, worker de rollup (1s → 1m → 15m → 1h) e consultas SQL de séries temporais. | DuckDB Repository + Downsampling Rollup Worker | Rafael Castro |
+| **S5.4 — Time-Series Store (DuckDB)** | Armazenamento colunar das métricas e da presença, separado por modo LIVE/REPLAY, e consultas SQL de séries temporais. | DuckDB Repository | Rafael Castro |
 
 ---
 
 ## 🔄 Fluxo de Dados
 
 ```text
-Barramento B3 (ods.s1.zone_transition, ods.s1.zone_occupancy, ods.s2.event,
-              ods.session.started, ods.p6.replay.state)
+Barramento B3 (ods.s1.zone_transition, ods.s1.zone_occupancy, ods.s1.position,
+              ods.s2.event, ods.session.started, ods.p6.replay.state)
   └─> subscribe_s5(consumer, handler) — um tópico por schema        (S5.1)
         └─> HandleBusMessageUseCase.execute(message)
-              IngestEnvelopeUseCase → Envelope + ZoneTransition | ZoneOccupancySample | QualifiedEvent
+              IngestEnvelopeUseCase → Envelope + objeto de domínio do schema
               MessageDeduplicator → descarta message_id repetido
               MetricsBuffer.add → guarda até a janela fechar; nova sessão reinicia o estado
   └─> MetricsWindowWorker.run() → CloseMetricWindowsUseCase.execute(now)  (S5.2)
@@ -89,7 +85,7 @@ Barramento B3 (ods.s1.zone_transition, ods.s1.zone_occupancy, ods.s2.event,
         QueryMetricsUseCase · QueryHeatmapUseCase → reply em ods.s5.*.reply
   └─> DuckDBTimeSeriesRepository                                   (S5.4)
         tabelas occupancy_metrics / event_metrics / presence_cells
-  └─> GET /api/v5/metrics/{zone_id} · GET /api/v5/heatmaps/{grid_id}   (depuração)
+  └─> GET /api/v5/metrics · GET /api/v5/heatmap                    (depuração)
 ```
 
 ---
@@ -119,14 +115,14 @@ Barramento B3 (ods.s1.zone_transition, ods.s1.zone_occupancy, ods.s2.event,
 ```
 
 **Processamento** (`IngestEnvelopeUseCase`):
-- Schema fora de `ods.s1.zone_transition`, `ods.s1.zone_occupancy`, `ods.s2.event`, `ods.session.started` e `ods.p6.replay.state` → `UnsupportedSchemaError`.
+- Schema fora de `ods.s1.zone_transition`, `ods.s1.zone_occupancy`, `ods.s1.position`, `ods.s2.event`, `ods.session.started` e `ods.p6.replay.state` → `UnsupportedSchemaError`.
 - `parse_envelope` exige os seis campos fixos e os do perfil do schema: EV-SINAL nas mensagens do S1 (`captured_at`, `source_id`, `session_id`, `sequence`, `artifact_version`) e EV-SERVIÇO no `ods.s2.event` (`captured_at`, `session_id`, `sequence`). `ods.session.started` e `ods.p6.replay.state` usam EV-SINAL sem `artifact_version`; `source_id` não é exigido neles porque P6 reproduz várias fontes, listadas em `sources`. Marcos de tempo precisam de fuso (`Z`) e são convertidos para UTC sem `tzinfo`, convenção de todo o S5. Campo ausente ou com formato inválido → `MalformedEventEnvelopeError`.
 - `MessageDeduplicator` descarta mensagens cujo `message_id` já foi aceito (regra 7) e retorna `None`. O id só é registrado depois que a mensagem é aceita.
 - `schema_version` com MAJOR diferente de `1` → `UnsupportedSchemaVersionError`; qualquer MINOR do MAJOR 1 é aceito (regra 8).
 
 Não há debounce nem histerese no S5: na 6c, a histerese é do S1, configurada pelo artefato ZONES, e a transição já chega confirmada.
 
-**Saída:** `IngestedMessage` com o envelope e um `ZoneTransition`, `ZoneOccupancySample` ou `QualifiedEvent`, ou `None` quando a mensagem é repetida. `subscribe_s5` assina um tópico por schema; uma mensagem fora do contrato é registrada em log e descartada, sem interromper as seguintes.
+**Saída:** `IngestedMessage` com o envelope e um `ZoneTransition`, `ZoneOccupancySample`, `PositionSample`, `QualifiedEvent`, `SessionStart` ou `ReplayState`, ou `None` quando a mensagem é repetida. `subscribe_s5` assina um tópico por schema; uma mensagem fora do contrato é registrada em log e descartada, sem interromper as seguintes.
 
 **Sessões** (`MetricsBuffer`): a camada 3 reinicia o estado a cada `ods.session.started` (Especificação 1.0, seção 7).
 - Uma sessão nova descarta as transições, amostras e eventos da anterior. Mensagens atrasadas da sessão encerrada, ou da `previous_session_id` anunciada, são ignoradas.
@@ -174,7 +170,7 @@ O `InMemoryB3EventConsumer` implementa os contratos `B3EventConsumer` e `IEventP
 
 O `MetricsBuffer` descarta o que ficou mais de um dia antes da última janela fechada. Ele preserva a última amostra de ocupação de cada zona e os eventos do S2 ainda não encerrados.
 
-O `AggregateZoneMetricsUseCase`, com janelas móveis terminando em um instante de referência, continua disponível para cálculo sob demanda.
+Cada granularidade é calculada direto dos dados brutos do buffer, sem rollup de uma granularidade fina para outra: assim a média de permanência de 1h, por exemplo, é a média das saídas da hora, e não a média das médias de cada minuto.
 
 ## 🗺️ S5.3 — Mapa de Calor e Consultas
 
@@ -223,10 +219,6 @@ Consulta com `space_id` + `cell_size_m`, ou `source_id` + `cell_size_px` em inst
 - Consultas não alteram estado, então uma consulta repetida é respondida de novo, em vez de descartada.
 - As consultas leem só métricas `LIVE`.
 
-### Código anterior à 6c
-
-`GenerateHeatmapUseCase`, `GridDensityCalculator`, `HomographyCalibratorAdapter` e a tabela `heatmap_cells` são do fluxo anterior, que aplicava a homografia no próprio S5 e normalizava a densidade entre 0 e 1. Continuam no código apenas para a rota REST de depuração.
-
 ## 🗄️ S5.4 — Time-Series Store (DuckDB)
 
 **Tabelas:**
@@ -236,24 +228,19 @@ Consulta com `space_id` + `cell_size_m`, ou `source_id` + `cell_size_px` em inst
 | `occupancy_metrics` | `zone_id`, `granularity`, `start_time`, `end_time`, `dwell_time_avg`, `occupancy_peak`, `total_count`, `occupancy_avg`, `mode`, `session_id` |
 | `event_metrics` | `event_type`, `zone_id`, `object_class`, `granularity`, `start_time`, `end_time`, `count`, `uncertain_count`, `duration_avg_ms`, `mode`, `session_id` |
 | `presence_cells` | `mode`, `session_id`, `space_kind`, `space_key`, `object_class`, `cell_x`, `cell_y`, `bucket_start`, `seconds` |
-| `heatmap_cells` | `grid_id`, `timestamp`, `x`, `y`, `density` (fluxo anterior à 6c) |
 
-**Rollup:** `DownsamplingRollupWorker.run(zone_id, reference_time)` encadeia `1s → 1m → 15m → 1h`. Ele deve ser disparado por um cron externo. Em cada salto, `DownsamplingService` consolida as métricas finas assim:
-- `total_count`: soma;
-- `occupancy_peak`: máximo;
-- `dwell_time_avg`: média **ponderada** por `total_count`;
-- `occupancy_avg`: média ponderada pela duração de cada janela fina.
+Os nomes de coluna são internos. Para fora, por barramento ou pela API de depuração, as métricas saem sempre com os campos da Especificação 1.0 (`dwell_avg_s`, `window_start_at` etc.).
 
-Cada métrica é gravada com o `mode` (`LIVE` ou `REPLAY`) e o `session_id` que a produziram. Um replay reproduz o tempo de captura original, então as janelas dele coincidem com as da captura ao vivo daquele dia. Por isso as consultas leem só `LIVE`, salvo pedido explícito (`mode="REPLAY"`), e um replay não duplica o histórico.
+Cada métrica é gravada com o `mode` (`LIVE` ou `REPLAY`) e o `session_id` que a produziram. Um replay reproduz o tempo de captura original, então as janelas dele coincidem com as da captura ao vivo daquele dia. Por isso as consultas leem só `LIVE`, e um replay não duplica o histórico.
 
 Bancos criados antes de `occupancy_avg`, `mode` e `session_id` existirem recebem as colunas na abertura, com `0` e `LIVE` nas linhas já gravadas.
 
-**API REST de depuração** (`create_metrics_query_router(repository)`, prefixo `/api/v5`). As aplicações consultam o S5 pelo barramento (S5.3); a API serve para inspecionar o banco durante o desenvolvimento:
+**API REST de depuração** (`create_metrics_query_router(repository)`, prefixo `/api/v5`). As aplicações consultam o S5 pelo barramento (S5.3). A API executa os mesmos casos de uso das consultas, com os mesmos parâmetros (como query string), o mesmo formato de resposta e os mesmos códigos de erro, para inspecionar o banco durante o desenvolvimento:
 
-| Método | Rota | Parâmetros | Resposta |
+| Método | Rota | Equivale a | Erros |
 | :--- | :--- | :--- | :--- |
-| `GET` | `/api/v5/metrics/{zone_id}` | `start_time`, `end_time` (ISO 8601), `granularity` (padrão `1m`) | `list[OccupancyMetricDTO]` |
-| `GET` | `/api/v5/heatmaps/{grid_id}` | `start_time`, `end_time` (ISO 8601) | `list[HeatmapQueryDTO]` |
+| `GET` | `/api/v5/metrics` | `ods.s5.metrics.query` | `404` em `UNKNOWN_ZONE`; `400` nos demais |
+| `GET` | `/api/v5/heatmap` | `ods.s5.heatmap.query` | `400` |
 
 ---
 
@@ -279,18 +266,20 @@ Os testes unitários usam fakes em memória ([`tests/unit/application/fakes.py`]
 
 ### Subindo a API
 
-O ponto de entrada é [`app.py`](app.py), que monta o router sobre um `DuckDBTimeSeriesRepository`. O banco padrão é `s5_metrics.db`; para usar outro caminho (ou `:memory:`), defina `S5_DATABASE_PATH`.
+O ponto de entrada é [`app.py`](app.py). Ele monta o S5 completo por `build_s5` ([`composition.py`](src/composition.py)) sobre o barramento em memória e um `DuckDBTimeSeriesRepository`, fecha as janelas a cada `S5_TICK_SECONDS` (padrão 5) e expõe a API de depuração. Enquanto não houver cliente de broker real, mensagens só chegam de dentro do processo. O banco padrão é `s5_metrics.db`; para usar outro caminho (ou `:memory:`), defina `S5_DATABASE_PATH`.
 
 ```bash
 uvicorn app:app --reload
 # http://localhost:8000/docs
 ```
 
-O banco começa vazio e a API é somente leitura. Para ter dados de exemplo (`zona-1` e `grid-1` em 2026-10-09), rode antes `python seed.py` e consulte:
+Para ter dados de exemplo (zona `vaga-12`, evento `PPE_NON_COMPLIANT` e presença em `patio-1`, em 2026-10-09 das 14h às 15h UTC), rode antes `python seed.py` e consulte:
 
 ```bash
-curl "http://localhost:8000/api/v5/metrics/zona-1?start_time=2026-10-09T00:00:00&end_time=2026-10-09T23:59:59"
-curl "http://localhost:8000/api/v5/heatmaps/grid-1?start_time=2026-10-09T00:00:00&end_time=2026-10-09T23:59:59"
+P="period_start_at=2026-10-09T14:00:00.000Z&period_end_at=2026-10-09T15:00:00.000Z"
+curl "http://localhost:8000/api/v5/metrics?metric=ZONE&zone_id=vaga-12&granularity=15m&$P"
+curl "http://localhost:8000/api/v5/metrics?metric=EVENT&granularity=1h&$P"
+curl "http://localhost:8000/api/v5/heatmap?space_id=patio-1&cell_size_m=0.5&$P"
 ```
 
 ---
@@ -299,11 +288,12 @@ curl "http://localhost:8000/api/v5/heatmaps/grid-1?start_time=2026-10-09T00:00:0
 
 | Verificação | Resultado |
 | :--- | :--- |
-| `pytest` (unitários + integração) | 196/196 aprovados |
-| Invariantes de domínio | Coordenadas não finitas, janelas invertidas, densidades negativas, matrizes fora de 3×3, IDs vazios, envelopes fora do contrato e `EXIT` sem `dwell_s` lançam exceções específicas de `DomainError` |
-| Contrato de entrada | Exemplos de `ods.s1.zone_transition`, `ods.s1.zone_occupancy` e `ods.s2.event` da Especificação 1.0, deduplicação por `message_id` e regra de MAJOR.MINOR |
+| `pytest` (unitários + integração) | 167/167 aprovados |
+| Invariantes de domínio | Janelas invertidas, IDs vazios, contagens negativas, enums fora do contrato, coordenadas não finitas, envelopes fora do contrato e `EXIT` sem `dwell_s` lançam exceções específicas de `DomainError` |
+| Contrato de entrada | Exemplos de `ods.s1.zone_transition`, `ods.s1.zone_occupancy`, `ods.s1.position`, `ods.s2.event`, `ods.session.started` e `ods.p6.replay.state` da Especificação 1.0, deduplicação por `message_id` e regra de MAJOR.MINOR |
 | Contrato de saída | `ods.s5.zone_metrics` e `ods.s5.event_metrics` com envelope EV-SERVIÇO; fluxo de ponta a ponta pelo barramento em memória |
 | Sessão e replay | Reinício do estado por `ods.session.started`, relógio de captura em replay, pausa, `LOOP` com nova sessão e separação LIVE/REPLAY no DuckDB |
 | Consultas | `ods.s5.metrics.query` e `ods.s5.heatmap.query` com os exemplos da especificação, códigos de erro, reply RPL e ciclo completo pelo barramento em memória |
-| Persistência DuckDB | Escrita e consulta por zona, granularidade e intervalo de tempo |
-| API HTTP | Rotas `/api/v5/metrics` e `/api/v5/heatmaps` testadas via `TestClient` |
+| Persistência DuckDB | Séries por zona e por tipo de evento, presença por célula, separação LIVE/REPLAY e migração de bancos antigos |
+| API HTTP | Rotas `/api/v5/metrics` e `/api/v5/heatmap` testadas via `TestClient` e com `uvicorn` sobre os dados do `seed.py` |
+| Composição | S5 montado por `build_s5` ingere, publica e responde a consultas pelo barramento em memória |

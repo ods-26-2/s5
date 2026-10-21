@@ -1,7 +1,4 @@
-from datetime import datetime
-
 from src.domain.entities.event_metric import EventMetric
-from src.domain.entities.heatmap_grid import HeatmapGrid
 from src.domain.entities.occupancy_metric import OccupancyMetric
 from src.domain.entities.session_start import LIVE
 from src.domain.services.presence_accumulator import PresenceKey
@@ -15,10 +12,8 @@ class FakeTimeSeriesRepository(ITimeSeriesRepository):
     def __init__(self) -> None:
         self.saved_metrics: list[tuple[OccupancyMetric, str]] = []
         self.saved_modes: list[tuple[str, str | None]] = []
-        self.saved_heatmaps: list[tuple[HeatmapGrid, datetime]] = []
         self.saved_event_metrics: list[tuple[EventMetric, str]] = []
         self.saved_presence: list[tuple[PresenceKey, float, str]] = []
-        self.metrics_to_return: list[OccupancyMetric] = []
 
     def save_occupancy_metric(
         self, metric: OccupancyMetric, granularity: str, mode: str = LIVE, session_id: str | None = None
@@ -66,14 +61,3 @@ class FakeTimeSeriesRepository(ITimeSeriesRepository):
 
     def zone_exists(self, zone_id: str) -> bool:
         return any(metric.zone_id == zone_id for metric, _ in self.saved_metrics)
-
-    def save_heatmap_grid(self, grid: HeatmapGrid, timestamp: datetime) -> None:
-        self.saved_heatmaps.append((grid, timestamp))
-
-    def query_metrics(
-        self, zone_id: str, window: TimeWindow, granularity: str, mode: str = LIVE
-    ) -> list[OccupancyMetric]:
-        return self.metrics_to_return
-
-    def query_heatmap(self, grid_id: str, window: TimeWindow) -> list[HeatmapGrid]:
-        return [grid for grid, _ in self.saved_heatmaps if grid.grid_id == grid_id]

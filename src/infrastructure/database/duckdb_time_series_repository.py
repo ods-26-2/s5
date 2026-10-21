@@ -1,16 +1,11 @@
-from datetime import datetime
-
 import duckdb
 
 from src.domain.entities.event_metric import EventMetric
-from src.domain.entities.heatmap_grid import HeatmapGrid
 from src.domain.entities.occupancy_metric import OccupancyMetric
 from src.domain.entities.session_start import LIVE
 from src.domain.services.presence_accumulator import PresenceKey
 from src.domain.repositories.i_time_series_repository import ITimeSeriesRepository
-from src.domain.value_objects.spatial_cell import SpatialCell
 from src.domain.value_objects.time_window import TimeWindow
-from src.domain.value_objects.world_coordinate import WorldCoordinate
 
 
 class DuckDBTimeSeriesRepository(ITimeSeriesRepository):
@@ -67,17 +62,6 @@ class DuckDBTimeSeriesRepository(ITimeSeriesRepository):
                 cell_y INTEGER,
                 bucket_start TIMESTAMP,
                 seconds DOUBLE
-            )
-            """
-        )
-        self._connection.execute(
-            """
-            CREATE TABLE IF NOT EXISTS heatmap_cells (
-                grid_id VARCHAR,
-                timestamp TIMESTAMP,
-                x DOUBLE,
-                y DOUBLE,
-                density DOUBLE
             )
             """
         )
@@ -148,33 +132,6 @@ class DuckDBTimeSeriesRepository(ITimeSeriesRepository):
                 session_id,
             ],
         )
-
-    def query_event_metrics(
-        self, event_type: str, window: TimeWindow, granularity: str, mode: str = LIVE
-    ) -> list[EventMetric]:
-        rows = self._connection.execute(
-            """
-            SELECT zone_id, object_class, start_time, end_time, count, uncertain_count, duration_avg_ms
-            FROM event_metrics
-            WHERE event_type = ? AND granularity = ? AND mode = ?
-                AND start_time >= ? AND end_time <= ?
-            ORDER BY start_time
-            """,
-            [event_type, granularity, mode, window.start_time, window.end_time],
-        ).fetchall()
-
-        return [
-            EventMetric(
-                event_type=event_type,
-                window=TimeWindow(start_time=row[2], end_time=row[3]),
-                count=row[4],
-                uncertain_count=row[5],
-                zone_id=row[0],
-                object_class=row[1],
-                duration_avg_ms=row[6],
-            )
-            for row in rows
-        ]
 
     def save_presence(self, cells: list[tuple[PresenceKey, float, str]]) -> None:
         rows = [
@@ -286,61 +243,3 @@ class DuckDBTimeSeriesRepository(ITimeSeriesRepository):
             "SELECT 1 FROM occupancy_metrics WHERE zone_id = ? LIMIT 1", [zone_id]
         ).fetchone()
         return row is not None
-
-    def save_heatmap_grid(self, grid: HeatmapGrid, timestamp: datetime) -> None:
-        rows = [
-            [grid.grid_id, timestamp, cell.position.x, cell.position.y, cell.density]
-            for cell in grid.cells
-        ]
-        if rows:
-            self._connection.executemany(
-                "INSERT INTO heatmap_cells (grid_id, timestamp, x, y, density) VALUES (?, ?, ?, ?, ?)",
-                rows,
-            )
-
-    def query_metrics(
-        self, zone_id: str, window: TimeWindow, granularity: str, mode: str = LIVE
-    ) -> list[OccupancyMetric]:
-        rows = self._connection.execute(
-            """
-            SELECT start_time, end_time, dwell_time_avg, occupancy_peak, total_count, occupancy_avg
-            FROM occupancy_metrics
-            WHERE zone_id = ? AND granularity = ? AND mode = ?
-                AND start_time >= ? AND end_time <= ?
-            ORDER BY start_time
-            """,
-            [zone_id, granularity, mode, window.start_time, window.end_time],
-        ).fetchall()
-
-        return [
-            OccupancyMetric(
-                zone_id=zone_id,
-                window=TimeWindow(start_time=row[0], end_time=row[1]),
-                dwell_time_avg=row[2],
-                occupancy_peak=row[3],
-                total_count=row[4],
-                occupancy_avg=row[5],
-            )
-            for row in rows
-        ]
-
-    def query_heatmap(self, grid_id: str, window: TimeWindow) -> list[HeatmapGrid]:
-        rows = self._connection.execute(
-            """
-            SELECT timestamp, x, y, density
-            FROM heatmap_cells
-            WHERE grid_id = ? AND timestamp >= ? AND timestamp <= ?
-            ORDER BY timestamp
-            """,
-            [grid_id, window.start_time, window.end_time],
-        ).fetchall()
-
-        grids_by_timestamp: dict[datetime, list[SpatialCell]] = {}
-        for timestamp, x, y, density in rows:
-            grids_by_timestamp.setdefault(timestamp, []).append(
-                SpatialCell(position=WorldCoordinate(x=x, y=y), density=density)
-            )
-
-        return [
-            HeatmapGrid(grid_id=grid_id, cells=tuple(cells)) for cells in grids_by_timestamp.values()
-        ]

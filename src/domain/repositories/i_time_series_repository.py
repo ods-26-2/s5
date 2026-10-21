@@ -1,8 +1,6 @@
 from abc import ABC, abstractmethod
-from datetime import datetime
 
 from src.domain.entities.event_metric import EventMetric
-from src.domain.entities.heatmap_grid import HeatmapGrid
 from src.domain.entities.occupancy_metric import OccupancyMetric
 from src.domain.entities.session_start import LIVE
 from src.domain.services.presence_accumulator import PresenceKey
@@ -71,14 +69,3 @@ class ITimeSeriesRepository(ABC):
     @abstractmethod
     def zone_exists(self, zone_id: str) -> bool:
         """Se há alguma métrica gravada para a zona, em qualquer modo."""
-
-    @abstractmethod
-    def save_heatmap_grid(self, grid: HeatmapGrid, timestamp: datetime) -> None: ...
-
-    @abstractmethod
-    def query_metrics(
-        self, zone_id: str, window: TimeWindow, granularity: str, mode: str = LIVE
-    ) -> list[OccupancyMetric]: ...
-
-    @abstractmethod
-    def query_heatmap(self, grid_id: str, window: TimeWindow) -> list[HeatmapGrid]: ...
