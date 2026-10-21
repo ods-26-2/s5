@@ -47,6 +47,11 @@ class InvalidSessionError(DomainError):
     (ods.p6.replay.state) tem modo, estado ou valores fora do contrato."""
 
 
+class InvalidPositionError(DomainError):
+    """Lançado quando uma posição de S1 tem ids vazios, coordenadas não finitas ou
+    position_m sem space_id."""
+
+
 class InvalidGranularityError(DomainError):
     """Lançado quando a granularidade não é uma de 1m, 15m, 1h e 1d."""
 
@@ -78,6 +83,15 @@ class MalformedEventEnvelopeError(ApplicationError):
 
 class UnsupportedSchemaError(ApplicationError):
     """Lançado quando chega uma mensagem de um schema que o S5 não consome."""
+
+
+class QueryRejectedError(ApplicationError):
+    """Lançado quando uma consulta é recusada; code vai no error da reply (regra 6)."""
+
+    def __init__(self, code: str, message: str) -> None:
+        super().__init__(message)
+        self.code = code
+        self.message = message
 
 
 class UnsupportedSchemaVersionError(ApplicationError):

@@ -10,6 +10,7 @@ from src.domain.services.event_metrics_aggregation import EventMetricsAggregatio
 from src.domain.services.message_deduplicator import MessageDeduplicator
 from src.domain.entities.session_start import REPLAY
 from tests.fixtures.spec_examples import (
+    position,
     REPLAY_SESSION_ID,
     SESSION_ID,
     in_session,
@@ -192,3 +193,16 @@ def test_nova_sessao_volta_o_cursor_ao_inicio_dela_e_abandona_janelas_abertas():
     assert published[0]["session_id"] == "loop-2"
     assert published[0]["sequence"] == 0
     assert published[0]["payload"]["dwell_avg_s"] == 0
+
+
+def test_deve_gravar_presenca_dos_minutos_fechados_com_o_modo_da_sessao():
+    use_case, ingest, buffer, repository, _ = _replay_setup()
+    for message_id, captured_at in (("p-1", "2026-09-23T14:29:59.000Z"), ("p-2", "2026-09-23T14:29:59.500Z")):
+        buffer.add(ingest.execute(in_session(position(), REPLAY_SESSION_ID, message_id, captured_at)))
+    _heartbeat(ingest, buffer, "2026-09-23T14:30:02.500Z", "hb-1")
+
+    use_case.execute(WALL_CLOCK)
+
+    [(key, seconds, mode)] = repository.saved_presence
+    assert (key.space_key, key.cell_x, key.cell_y, mode) == ("patio-1", 34, 71, REPLAY)
+    assert seconds == 0.5

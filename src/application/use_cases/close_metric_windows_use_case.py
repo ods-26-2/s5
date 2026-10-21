@@ -1,13 +1,9 @@
 from datetime import datetime, timedelta
 
-from src.application.messaging.outgoing_envelope_factory import (
-    OutgoingEnvelopeFactory,
-    format_utc,
-)
+from src.application.messaging.metric_payloads import event_metrics_payload, zone_metrics_payload
+from src.application.messaging.outgoing_envelope_factory import OutgoingEnvelopeFactory
 from src.application.ports.event_publisher import IEventPublisher
 from src.application.state.metrics_buffer import MetricsBuffer
-from src.domain.entities.event_metric import EventMetric
-from src.domain.entities.occupancy_metric import OccupancyMetric
 from src.domain.entities.session_start import REPLAY
 from src.domain.repositories.i_time_series_repository import ITimeSeriesRepository
 from src.domain.services.aggregation_strategy import AggregationStrategy
@@ -76,10 +72,18 @@ class CloseMetricWindowsUseCase:
                 published += self._close_zone_window(granularity, window, session.session_id, session.mode)
                 published += self._close_event_window(granularity, window, session.session_id, session.mode)
 
+        self._persist_presence(session.session_id, until)
         self._closed_until = until
         longest = max(GRANULARITY_SECONDS[g] for g in self._granularities)
         self._buffer.prune(before=until - timedelta(seconds=longest))
         return published
+
+    def _persist_presence(self, session_id: str, until: datetime) -> None:
+        drained = self._buffer.presence.drain(session_id, until)
+        if drained:
+            self._repository.save_presence(
+                [(key, seconds, self._buffer.mode_of(key.session_id)) for key, seconds in drained.items()]
+            )
 
     def _close_zone_window(
         self, granularity: str, window: TimeWindow, session_id: str, mode: str
@@ -95,7 +99,7 @@ class CloseMetricWindowsUseCase:
             messages.append(
                 self._publish(
                     ZONE_METRICS_SCHEMA,
-                    _zone_metrics_payload(metric, granularity),
+                    zone_metrics_payload(metric, granularity),
                     window.end_time,
                     session_id,
                     source_id=context.source_id,
@@ -115,7 +119,7 @@ class CloseMetricWindowsUseCase:
             messages.append(
                 self._publish(
                     EVENT_METRICS_SCHEMA,
-                    _event_metrics_payload(metric, granularity),
+                    event_metrics_payload(metric, granularity),
                     window.end_time,
                     session_id,
                     artifact_version=self._buffer.rules_versions.get(metric.event_type),
@@ -132,35 +136,3 @@ class CloseMetricWindowsUseCase:
         self._publisher.publish(schema, message)
         return message
 
-
-def _window_fields(window: TimeWindow, granularity: str) -> dict:
-    return {
-        "window_start_at": format_utc(window.start_time),
-        "window_end_at": format_utc(window.end_time),
-        "granularity": granularity,
-    }
-
-
-def _zone_metrics_payload(metric: OccupancyMetric, granularity: str) -> dict:
-    return {
-        "zone_id": metric.zone_id,
-        **_window_fields(metric.window, granularity),
-        "total_count": metric.total_count,
-        "occupancy_peak": metric.occupancy_peak,
-        "occupancy_avg": round(metric.occupancy_avg, 4),
-        "dwell_avg_s": round(metric.dwell_time_avg),
-    }
-
-
-def _event_metrics_payload(metric: EventMetric, granularity: str) -> dict:
-    payload = {"event_type": metric.event_type}
-    if metric.zone_id is not None:
-        payload["zone_id"] = metric.zone_id
-    if metric.object_class is not None:
-        payload["class"] = metric.object_class
-    payload.update(_window_fields(metric.window, granularity))
-    payload["count"] = metric.count
-    payload["uncertain_count"] = metric.uncertain_count
-    if metric.duration_avg_ms is not None:
-        payload["duration_avg_ms"] = metric.duration_avg_ms
-    return payload

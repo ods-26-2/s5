@@ -2,11 +2,13 @@ from dataclasses import dataclass, field
 from datetime import datetime
 
 from src.application.use_cases.ingest_envelope_use_case import IngestedMessage
+from src.domain.entities.position_sample import PositionSample
 from src.domain.entities.qualified_event import ENDED, QualifiedEvent
 from src.domain.entities.replay_state import ReplayState
 from src.domain.entities.session_start import LIVE, SessionStart
 from src.domain.entities.zone_occupancy_sample import ZoneOccupancySample
 from src.domain.entities.zone_transition import ZoneTransition
+from src.domain.services.presence_accumulator import PresenceAccumulator
 
 
 @dataclass
@@ -50,12 +52,18 @@ class MetricsBuffer:
     events: list[QualifiedEvent] = field(default_factory=list)
     zones: dict[str, ZoneContext] = field(default_factory=dict)
     rules_versions: dict[str, str] = field(default_factory=dict)
+    presence: PresenceAccumulator = field(default_factory=PresenceAccumulator)
     session: SessionClock | None = None
     ended_sessions: set[str] = field(default_factory=set)
+    session_modes: dict[str, str] = field(default_factory=dict)
 
     @property
     def current_session_id(self) -> str | None:
         return self.session.session_id if self.session else None
+
+    def mode_of(self, session_id: str) -> str:
+        """Modo de uma sessão vista por este buffer; LIVE se ela nunca foi anunciada."""
+        return self.session_modes.get(session_id, LIVE)
 
     def add(self, ingested: IngestedMessage) -> bool:
         """Guarda a mensagem; devolve False quando ela pertence a uma sessão encerrada."""
@@ -78,6 +86,9 @@ class MetricsBuffer:
         self.session.watermark = max(self.session.watermark, envelope.captured_at)
 
         if isinstance(message, ReplayState):
+            return True
+        if isinstance(message, PositionSample):
+            self.presence.observe(message)
             return True
         if isinstance(message, QualifiedEvent):
             self.events.append(message)
@@ -116,6 +127,7 @@ class MetricsBuffer:
     def _start_session(self, start: SessionStart) -> None:
         if start.previous_session_id:
             self.ended_sessions.add(start.previous_session_id)
+        self.session_modes[start.session_id] = start.mode
         if self.session is not None and self.session.session_id == start.session_id:
             self.session.mode = start.mode
             self.session.started_at = min(self.session.started_at, start.started_at)
@@ -133,6 +145,8 @@ class MetricsBuffer:
     def _switch_to(self, clock: SessionClock) -> None:
         if self.session is not None:
             self.ended_sessions.add(self.session.session_id)
+            self.presence.forget_tracks(self.session.session_id)
+        self.session_modes.setdefault(clock.session_id, clock.mode)
         self.transitions = []
         self.samples = []
         self.events = []

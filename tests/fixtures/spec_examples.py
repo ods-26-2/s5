@@ -79,6 +79,68 @@ _QUALIFIED_EVENT = {
     },
 }
 
+_POSITION = {
+    "message_type": "event",
+    "message_id": "60718293-a4b5-4f20-9b3c-5d6e7f8091a2",
+    "schema": "ods.s1.position",
+    "schema_version": "1.0",
+    "producer": "S1",
+    "published_at": "2026-09-23T14:30:00.140Z",
+    "captured_at": "2026-09-23T14:29:59.870Z",
+    "source_id": "cam0",
+    "session_id": SESSION_ID,
+    "sequence": 48213,
+    "artifact_version": "zones-a8-2",
+    "payload": {
+        "frame_index": 48213,
+        "positions": [
+            {
+                "track_id": "t-0391",
+                "class": "person",
+                "point_px": [505, 702],
+                "position_m": [3.42, 7.10],
+                "space_id": "patio-1",
+                "zone_ids": ["vaga-12"],
+            }
+        ],
+    },
+}
+
+_METRICS_QUERY = {
+    "message_type": "query",
+    "message_id": "71829304-b5c6-4031-8c4d-6e7f8091a2b3",
+    "schema": "ods.s5.metrics.query",
+    "schema_version": "1.0",
+    "producer": "A8",
+    "target": "S5",
+    "published_at": "2026-09-23T15:00:00.000Z",
+    "payload": {
+        "metric": "ZONE",
+        "zone_id": "vaga-12",
+        "class": "vehicle",
+        "period_start_at": "2026-09-22T00:00:00.000Z",
+        "period_end_at": "2026-09-23T00:00:00.000Z",
+        "granularity": "1h",
+    },
+}
+
+_HEATMAP_QUERY = {
+    "message_type": "query",
+    "message_id": "8293a4b5-c6d7-4142-9d5e-7f8091a2b3c4",
+    "schema": "ods.s5.heatmap.query",
+    "schema_version": "1.0",
+    "producer": "A3",
+    "target": "S5",
+    "published_at": "2026-09-23T15:00:00.000Z",
+    "payload": {
+        "space_id": "patio-1",
+        "class": "person",
+        "period_start_at": "2026-09-23T14:00:00.000Z",
+        "period_end_at": "2026-09-23T15:00:00.000Z",
+        "cell_size_m": 0.5,
+    },
+}
+
 REPLAY_SESSION_ID = "4b5c6d7e-8f90-4a1b-9c2d-3e4f5a6b7c8d"
 
 _REPLAY_SESSION_STARTED = {
@@ -150,3 +212,15 @@ def in_session(message: dict, session_id: str, message_id: str, captured_at: str
     if captured_at is not None:
         message["captured_at"] = captured_at
     return message
+
+
+def position() -> dict:
+    return copy.deepcopy(_POSITION)
+
+
+def metrics_query() -> dict:
+    return copy.deepcopy(_METRICS_QUERY)
+
+
+def heatmap_query() -> dict:
+    return copy.deepcopy(_HEATMAP_QUERY)

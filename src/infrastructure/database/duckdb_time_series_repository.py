@@ -6,6 +6,7 @@ from src.domain.entities.event_metric import EventMetric
 from src.domain.entities.heatmap_grid import HeatmapGrid
 from src.domain.entities.occupancy_metric import OccupancyMetric
 from src.domain.entities.session_start import LIVE
+from src.domain.services.presence_accumulator import PresenceKey
 from src.domain.repositories.i_time_series_repository import ITimeSeriesRepository
 from src.domain.value_objects.spatial_cell import SpatialCell
 from src.domain.value_objects.time_window import TimeWindow
@@ -51,6 +52,21 @@ class DuckDBTimeSeriesRepository(ITimeSeriesRepository):
                 duration_avg_ms INTEGER,
                 mode VARCHAR DEFAULT 'LIVE',
                 session_id VARCHAR
+            )
+            """
+        )
+        self._connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS presence_cells (
+                mode VARCHAR,
+                session_id VARCHAR,
+                space_kind VARCHAR,
+                space_key VARCHAR,
+                object_class VARCHAR,
+                cell_x INTEGER,
+                cell_y INTEGER,
+                bucket_start TIMESTAMP,
+                seconds DOUBLE
             )
             """
         )
@@ -159,6 +175,117 @@ class DuckDBTimeSeriesRepository(ITimeSeriesRepository):
             )
             for row in rows
         ]
+
+    def save_presence(self, cells: list[tuple[PresenceKey, float, str]]) -> None:
+        rows = [
+            [
+                mode,
+                key.session_id,
+                key.space_kind,
+                key.space_key,
+                key.object_class,
+                key.cell_x,
+                key.cell_y,
+                key.bucket_start,
+                seconds,
+            ]
+            for key, seconds, mode in cells
+        ]
+        if rows:
+            self._connection.executemany(
+                "INSERT INTO presence_cells VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)", rows
+            )
+
+    def query_presence(
+        self,
+        space_kind: str,
+        space_key: str,
+        window: TimeWindow,
+        object_class: str | None = None,
+        mode: str = LIVE,
+    ) -> list[tuple[int, int, float]]:
+        rows = self._connection.execute(
+            """
+            SELECT cell_x, cell_y, SUM(seconds)
+            FROM presence_cells
+            WHERE space_kind = ? AND space_key = ? AND mode = ?
+                AND bucket_start >= ? AND bucket_start < ?
+                AND (? IS NULL OR object_class = ?)
+            GROUP BY cell_x, cell_y
+            ORDER BY cell_y, cell_x
+            """,
+            [space_kind, space_key, mode, window.start_time, window.end_time, object_class, object_class],
+        ).fetchall()
+        return [(row[0], row[1], row[2]) for row in rows]
+
+    def query_zone_series(
+        self, window: TimeWindow, granularity: str, zone_id: str | None = None, mode: str = LIVE
+    ) -> list[OccupancyMetric]:
+        rows = self._connection.execute(
+            """
+            SELECT zone_id, start_time, end_time, dwell_time_avg, occupancy_peak, total_count, occupancy_avg
+            FROM occupancy_metrics
+            WHERE granularity = ? AND mode = ? AND start_time >= ? AND end_time <= ?
+                AND (? IS NULL OR zone_id = ?)
+            ORDER BY start_time, zone_id
+            """,
+            [granularity, mode, window.start_time, window.end_time, zone_id, zone_id],
+        ).fetchall()
+        return [
+            OccupancyMetric(
+                zone_id=row[0],
+                window=TimeWindow(start_time=row[1], end_time=row[2]),
+                dwell_time_avg=row[3],
+                occupancy_peak=row[4],
+                total_count=row[5],
+                occupancy_avg=row[6],
+            )
+            for row in rows
+        ]
+
+    def query_event_series(
+        self,
+        window: TimeWindow,
+        granularity: str,
+        event_type: str | None = None,
+        zone_id: str | None = None,
+        object_class: str | None = None,
+        mode: str = LIVE,
+    ) -> list[EventMetric]:
+        rows = self._connection.execute(
+            """
+            SELECT event_type, zone_id, object_class, start_time, end_time,
+                   count, uncertain_count, duration_avg_ms
+            FROM event_metrics
+            WHERE granularity = ? AND mode = ? AND start_time >= ? AND end_time <= ?
+                AND (? IS NULL OR event_type = ?)
+                AND (? IS NULL OR zone_id = ?)
+                AND (? IS NULL OR object_class = ?)
+            ORDER BY start_time, event_type, zone_id, object_class
+            """,
+            [
+                granularity, mode, window.start_time, window.end_time,
+                event_type, event_type, zone_id, zone_id, object_class, object_class,
+            ],
+        ).fetchall()
+        return [
+            EventMetric(
+                event_type=row[0],
+                window=TimeWindow(start_time=row[3], end_time=row[4]),
+                count=row[5],
+                uncertain_count=row[6],
+                zone_id=row[1],
+                object_class=row[2],
+                duration_avg_ms=row[7],
+            )
+            for row in rows
+        ]
+
+    def zone_exists(self, zone_id: str) -> bool:
+        row = self._connection.execute(
+            "SELECT 1 FROM occupancy_metrics WHERE zone_id = ? LIMIT 1", [zone_id]
+        ).fetchone()
+        return row is not None
 
     def save_heatmap_grid(self, grid: HeatmapGrid, timestamp: datetime) -> None:
         rows = [

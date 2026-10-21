@@ -3,6 +3,7 @@ from datetime import datetime
 import pytest
 
 from src.application.use_cases.ingest_envelope_use_case import IngestEnvelopeUseCase
+from src.domain.entities.position_sample import PositionSample
 from src.domain.entities.qualified_event import QualifiedEvent
 from src.domain.entities.replay_state import ReplayState
 from src.domain.entities.session_start import SessionStart
@@ -15,6 +16,7 @@ from src.domain.exceptions import (
 )
 from src.domain.services.message_deduplicator import MessageDeduplicator
 from tests.fixtures.spec_examples import (
+    position,
     qualified_event,
     replay_session_started,
     replay_state,
@@ -159,5 +161,33 @@ def test_deve_rejeitar_session_started_com_modo_desconhecido():
 def test_deve_rejeitar_session_started_com_sources_que_nao_seja_lista():
     message = replay_session_started()
     message["payload"]["sources"] = "cam0"
+    with pytest.raises(MalformedEventEnvelopeError):
+        _use_case().execute(message)
+
+
+def test_deve_converter_s1_position_do_exemplo_da_especificacao():
+    message = _use_case().execute(position()).message
+
+    assert isinstance(message, PositionSample)
+    assert message.frame_index == 48213
+    [track] = message.positions
+    assert track.point_px == (505.0, 702.0)
+    assert track.position_m == (3.42, 7.10)
+    assert track.space_id == "patio-1"
+    assert track.zone_ids == ("vaga-12",)
+
+
+def test_deve_aceitar_position_sem_calibracao():
+    message = position()
+    del message["payload"]["positions"][0]["position_m"]
+    del message["payload"]["positions"][0]["space_id"]
+
+    [track] = _use_case().execute(message).message.positions
+    assert track.position_m is None
+
+
+def test_deve_rejeitar_point_px_que_nao_seja_par_numerico():
+    message = position()
+    message["payload"]["positions"][0]["point_px"] = [505]
     with pytest.raises(MalformedEventEnvelopeError):
         _use_case().execute(message)

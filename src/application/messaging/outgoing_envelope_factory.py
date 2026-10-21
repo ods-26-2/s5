@@ -16,7 +16,8 @@ def _utc_now() -> datetime:
 
 
 class OutgoingEnvelopeFactory:
-    """Monta mensagens de evento do S5 com o perfil EV-SERVIÇO (seção 3).
+    """Monta as mensagens publicadas pelo S5: eventos com o perfil EV-SERVIÇO e replies
+    com o perfil RPL (seção 3).
 
     sequence é um contador crescente por session_id, a partir de 0, para que o consumidor
     detecte perda. Relógio e gerador de ids são injetáveis para os testes.
@@ -63,3 +64,17 @@ class OutgoingEnvelopeFactory:
         message.update({name: value for name, value in optional.items() if value is not None})
         message["payload"] = payload
         return message
+
+    def reply(self, schema: str, correlation_id: str, payload: dict) -> dict:
+        """Reply com o perfil RPL: sem campos de sinal; correlation_id é o message_id do
+        pedido e o payload traz status (e error, quando ERROR)."""
+        return {
+            "message_type": "reply",
+            "message_id": self._id_factory(),
+            "schema": schema,
+            "schema_version": SCHEMA_VERSION,
+            "producer": PRODUCER,
+            "published_at": format_utc(self._clock()),
+            "correlation_id": correlation_id,
+            "payload": payload,
+        }

@@ -5,6 +5,7 @@ import duckdb
 from src.domain.entities.event_metric import EventMetric
 from src.domain.entities.heatmap_grid import HeatmapGrid
 from src.domain.entities.occupancy_metric import OccupancyMetric
+from src.domain.services.presence_accumulator import PresenceKey
 from src.domain.value_objects.spatial_cell import SpatialCell
 from src.domain.value_objects.time_window import TimeWindow
 from src.domain.value_objects.world_coordinate import WorldCoordinate
@@ -146,3 +147,43 @@ def test_deve_acrescentar_mode_e_session_id_em_event_metrics_criada_sem_elas(tmp
     window = TimeWindow(start_time=base_time, end_time=base_time + timedelta(hours=1))
 
     assert [m.count for m in repository.query_event_metrics("X", window, "1h")] == [2]
+
+
+def test_deve_somar_presenca_por_celula_fina_no_periodo_filtrando_classe_e_modo():
+    repository = DuckDBTimeSeriesRepository(":memory:")
+    bucket = datetime(2026, 9, 23, 14, 10)
+
+    def key(object_class="person", minute=0, session="s-1"):
+        return PresenceKey(session, "METERS", "patio-1", object_class, 34, 71, bucket + timedelta(minutes=minute))
+
+    repository.save_presence([
+        (key(), 2.0, "LIVE"),
+        (key(minute=1), 3.5, "LIVE"),
+        (key(object_class="vehicle"), 9.0, "LIVE"),
+        (key(session="s-replay"), 7.0, "REPLAY"),
+        (key(minute=60), 1.0, "LIVE"),
+    ])
+    hour = TimeWindow(start_time=datetime(2026, 9, 23, 14), end_time=datetime(2026, 9, 23, 15))
+
+    assert repository.query_presence("METERS", "patio-1", hour, object_class="person") == [(34, 71, 5.5)]
+    assert repository.query_presence("METERS", "patio-1", hour) == [(34, 71, 14.5)]
+    assert repository.query_presence("METERS", "patio-1", hour, mode="REPLAY") == [(34, 71, 7.0)]
+
+
+def test_deve_consultar_series_com_filtros_opcionais():
+    repository = DuckDBTimeSeriesRepository(":memory:")
+    base_time = datetime(2026, 9, 23, 14, 0, 0)
+    window = TimeWindow(start_time=base_time, end_time=base_time + timedelta(hours=1))
+    for zone_id in ("vaga-12", "vaga-13"):
+        repository.save_occupancy_metric(
+            OccupancyMetric(zone_id=zone_id, window=window, dwell_time_avg=1.0, occupancy_peak=1, total_count=1), "1h"
+        )
+    repository.save_event_metric(EventMetric(event_type="A", window=window, count=1, uncertain_count=0, zone_id="z"), "1h")
+    repository.save_event_metric(EventMetric(event_type="B", window=window, count=2, uncertain_count=0), "1h")
+    day = TimeWindow(start_time=base_time, end_time=base_time + timedelta(days=1))
+
+    assert [m.zone_id for m in repository.query_zone_series(day, "1h")] == ["vaga-12", "vaga-13"]
+    assert [m.zone_id for m in repository.query_zone_series(day, "1h", zone_id="vaga-13")] == ["vaga-13"]
+    assert [m.event_type for m in repository.query_event_series(day, "1h")] == ["A", "B"]
+    assert [m.count for m in repository.query_event_series(day, "1h", zone_id="z")] == [1]
+    assert repository.zone_exists("vaga-12") and not repository.zone_exists("vaga-99")

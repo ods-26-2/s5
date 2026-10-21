@@ -2,7 +2,7 @@
 
 > Componente da **Camada 3 (Serviço)** do Squad **MOD-2** (Mídia, Métricas e Interfaces) no projeto **ODS 2026/2**.
 
-O serviço **S5** transforma as transições e as ocupações de zona publicadas pelo S1 (arquitetura 6c, Especificação de interfaces 1.0) em dados agregados **no tempo** (tempo de permanência, pico de ocupação, contagem de entradas) e **no espaço** (mapas de calor em coordenadas métricas de mundo, via homografia do I3). As métricas são persistidas em um armazenamento analítico colunar (**DuckDB**), consolidadas por rollup (1s → 1m → 15m → 1h) e expostas às aplicações por uma API REST.
+O serviço **S5** transforma o que o S1 e o S2 publicam (arquitetura 6c, Especificação de interfaces 1.0) em dados agregados **no tempo** (tempo de permanência, ocupação, entradas, eventos por tipo) e **no espaço** (segundos de presença por célula, em metros quando a câmera tem calibração do I3 e em pixels quando não tem). As métricas são persistidas em um armazenamento analítico colunar (**DuckDB**), publicadas no barramento B3 ao fechar cada janela e consultadas pelas aplicações por request/reply (`ods.s5.metrics.query` e `ods.s5.heatmap.query`).
 
 ---
 
@@ -19,20 +19,21 @@ s5/
 ├── pytest.ini                  # Configuração dos testes (pythonpath = .)
 ├── src/
 │   ├── domain/                 # 1. Coração do negócio (zero dependências externas)
-│   │   ├── entities/           # ZoneTransition, ZoneOccupancySample, QualifiedEvent, SessionStart,
-│   │   │                       #   ReplayState, OccupancyMetric, EventMetric, HeatmapGrid
+│   │   ├── entities/           # ZoneTransition, ZoneOccupancySample, PositionSample, QualifiedEvent,
+│   │   │                       #   SessionStart, ReplayState, OccupancyMetric, EventMetric, HeatmapGrid
 │   │   ├── value_objects/      # Envelope, TimeWindow, WorldCoordinate, PixelCoordinate,
 │   │   │                       #   SpatialCell, HomographyMatrix
 │   │   ├── repositories/       # Contrato ITimeSeriesRepository
-│   │   ├── services/           # MessageDeduplicator, AggregationStrategy,
+│   │   ├── services/           # MessageDeduplicator, AggregationStrategy, PresenceAccumulator,
 │   │   │                       #   MovingWindowGenerator, SpatialCoordinateConverter,
 │   │   │                       #   GridDensityCalculator, DownsamplingService
 │   │   └── exceptions/         # Hierarquia de exceções (DomainError, ApplicationError)
 │   ├── application/            # 2. Orquestração de casos de uso e DTOs
 │   │   ├── use_cases/          # IngestEnvelope, HandleBusMessage, CloseMetricWindows,
+│   │   │                       #   AnswerQuery, QueryMetrics, QueryHeatmap,
 │   │   │                       #   AggregateZoneMetrics, GenerateHeatmap, RollupMetrics
 │   │   ├── parsers/            # Leitura do envelope comum de 13 campos
-│   │   ├── messaging/          # Montagem do envelope EV-SERVIÇO das mensagens publicadas
+│   │   ├── messaging/          # Envelopes EV-SERVIÇO e RPL e payloads das métricas
 │   │   ├── ports/              # IEventPublisher (publicação no B3)
 │   │   ├── state/              # MetricsBuffer (mensagens das janelas abertas)
 │   │   └── dtos/               # OccupancyMetricDTO, HeatmapQueryDTO
@@ -59,9 +60,9 @@ Conforme definido em [`docs/responsability.md`](../docs/responsability.md):
 
 | Submódulo | Funcionalidade | Padrão / Arquitetura | Responsável |
 | :--- | :--- | :--- | :--- |
-| **S5.1 — Ingestor de Eventos B3** | Consumo Pub/Sub do B3, leitura do envelope comum, deduplicação por `message_id` e conversão de `ods.s1.zone_transition`, `ods.s1.zone_occupancy`, `ods.s2.event`, `ods.session.started` e `ods.p6.replay.state`; reinício do estado a cada sessão. | Event Consumer + Deduplicator | Rafael Castro |
+| **S5.1 — Ingestor de Eventos B3** | Consumo Pub/Sub do B3, leitura do envelope comum, deduplicação por `message_id` e conversão de `ods.s1.zone_transition`, `ods.s1.zone_occupancy`, `ods.s1.position`, `ods.s2.event`, `ods.session.started` e `ods.p6.replay.state`; reinício do estado a cada sessão. | Event Consumer + Deduplicator | Rafael Castro |
 | **S5.2 — Motor de Agregação** | Métricas por zona (permanência, pico e média de ocupação, entradas) e por tipo de evento em janelas alinhadas de 1m, 15m, 1h e 1d, publicadas em `ods.s5.zone_metrics` e `ods.s5.event_metrics`. | Time Window Engine + Aggregator Strategy | Rafael Castro |
-| **S5.3 — Gerador de Mapa de Calor** | Projeção de pixels $(u, v)$ no plano de mundo pela homografia I3 ($H \in \mathbb{R}^{3\times 3}$) e cálculo de densidade em grade. | Spatial Coordinate Converter + Grid Density Calculator | Rafael Castro |
+| **S5.3 — Mapa de Calor e Consultas** | Segundos de presença por célula a partir de `ods.s1.position`; respostas a `ods.s5.metrics.query` e `ods.s5.heatmap.query`. | Presence Accumulator + Request/Reply | Rafael Castro |
 | **S5.4 — Time-Series Store (DuckDB)** | Armazenamento colunar OLAP, worker de rollup (1s → 1m → 15m → 1h) e consultas SQL de séries temporais. | DuckDB Repository + Downsampling Rollup Worker | Rafael Castro |
 
 ---
@@ -81,13 +82,14 @@ Barramento B3 (ods.s1.zone_transition, ods.s1.zone_occupancy, ods.s2.event,
         ZoneOccupancyAggregationStrategy → OccupancyMetric por zona
         EventMetricsAggregation → EventMetric por tipo de evento
         persiste e publica ods.s5.zone_metrics / ods.s5.event_metrics
-  └─> GenerateHeatmapUseCase.execute(pixels, H, grid_id, t)        (S5.3)
-        SpatialCoordinateConverter (H · [u, v, 1]ᵀ) → WorldCoordinate
-        GridDensityCalculator → HeatmapGrid (densidade 0.0–1.0)
+        PresenceAccumulator.drain → presença dos minutos fechados
+  └─> ods.s1.position → PresenceAccumulator.observe                (S5.3)
+        segundos por célula fina (0,1 m ou 10 px) e minuto
+  └─> ods.s5.metrics.query / ods.s5.heatmap.query → AnswerQueryUseCase  (S5.3)
+        QueryMetricsUseCase · QueryHeatmapUseCase → reply em ods.s5.*.reply
   └─> DuckDBTimeSeriesRepository                                   (S5.4)
-        tabelas occupancy_metrics / heatmap_cells
-        DownsamplingRollupWorker.run() → 1s → 1m → 15m → 1h
-  └─> GET /api/v5/metrics/{zone_id} · GET /api/v5/heatmaps/{grid_id}
+        tabelas occupancy_metrics / event_metrics / presence_cells
+  └─> GET /api/v5/metrics/{zone_id} · GET /api/v5/heatmaps/{grid_id}   (depuração)
 ```
 
 ---
@@ -174,20 +176,56 @@ O `MetricsBuffer` descarta o que ficou mais de um dia antes da última janela fe
 
 O `AggregateZoneMetricsUseCase`, com janelas móveis terminando em um instante de referência, continua disponível para cálculo sob demanda.
 
-## 🗺️ S5.3 — Gerador de Mapa de Calor
+## 🗺️ S5.3 — Mapa de Calor e Consultas
 
-**Entrada:** coordenadas de pixel `PixelCoordinate(u, v)` + `HomographyMatrix` 3×3 do I3.
+### Presença por célula
 
-**Processamento:**
-- `HomographyMatrix.project()` multiplica $H \cdot [u, v, 1]^T$ e divide por $w$, o que dá a posição em metros no plano do mundo. Se $w = 0$, a projeção é rejeitada.
-- `GridDensityCalculator(cell_size)` agrupa os pontos em células regulares e normaliza a densidade pelo pico (a célula mais cheia fica com `1.0`).
-- `HomographyCalibratorAdapter` carrega a matriz de um arquivo JSON de calibração:
+**Entrada:** `ods.s1.position`, uma mensagem por quadro e câmera, com `point_px` de cada rastro e, quando a câmera tem calibração do I3, `position_m` e `space_id`. O S5 não aplica homografia: a posição em metros já vem do S1.
+
+**Processamento** (`PresenceAccumulator`):
+- O intervalo entre duas posições consecutivas do mesmo rastro conta como presença na célula da primeira, que é onde o objeto estava naquele tempo.
+- Intervalos acima de 1 s são descartados: houve perda de quadros, e o objeto pode não ter ficado ali.
+- A presença é somada por espaço (`space_id` em metros, ou `source_id` em pixels), classe, célula fina (**0,1 m** ou **10 px**) e minuto UTC.
+- Os minutos fechados são gravados na tabela `presence_cells` a cada disparo do `MetricsWindowWorker`, com o `mode` da sessão.
+- Câmeras diferentes acumulam separadamente. Uma pessoa vista por duas câmeras calibradas no mesmo espaço conta em dobro; a fusão entre câmeras é do S2.
+
+### `ods.s5.heatmap.query`
+
+Consulta com `space_id` + `cell_size_m`, ou `source_id` + `cell_size_px` em instalação sem calibração. `class` é opcional.
 
 ```json
-{ "homography_matrix": [[1, 0, 0], [0, 1, 0], [0, 0, 1]] }
+{ "space_id": "patio-1", "class": "person", "period_start_at": "2026-09-23T14:00:00.000Z",
+  "period_end_at": "2026-09-23T15:00:00.000Z", "cell_size_m": 0.5 }
 ```
 
-**Saída:** `HeatmapQueryDTO { grid_id, cells: [(x, y, density), ...] }`.
+- As células finas são agrupadas no tamanho pedido, que precisa ser pelo menos a resolução base.
+- A grade cobre só o retângulo com presença: `origin` é o canto da primeira célula, e `cells[y][x]` são segundos de presença, inteiros.
+- Sem presença no período, a reply traz uma grade vazia.
+- Grade maior que 200×200 → `GRID_TOO_LARGE`. A especificação prevê entregá-la por `heatmap_uri`, mas o S5 ainda não tem onde guardar o arquivo.
+
+### `ods.s5.metrics.query`
+
+```json
+{ "metric": "ZONE", "zone_id": "vaga-12", "class": "vehicle",
+  "period_start_at": "2026-09-22T00:00:00.000Z", "period_end_at": "2026-09-23T00:00:00.000Z",
+  "granularity": "1h" }
+```
+
+- `metric` `ZONE` devolve itens no formato de `ods.s5.zone_metrics`; `EVENT` devolve no formato de `ods.s5.event_metrics`, filtrando por `event_type`, `zone_id` e `class`, todos opcionais.
+- Em `ZONE`, `class` é aceito mas não restringe a série. As métricas por zona somam as classes que a zona conta, definidas no artefato ZONES, e os itens saem sem o campo `class`.
+- A série vem em ordem cronológica, com no máximo 1000 pontos. Período com mais de 1000 janelas da granularidade pedida → `PERIOD_TOO_LONG`.
+- Zona sem nenhuma métrica gravada → `UNKNOWN_ZONE`. Campo ausente ou inválido → `INVALID_QUERY`.
+
+### Respostas (`AnswerQueryUseCase`)
+
+- A consulta segue o perfil CMD (`target` obrigatório). Consulta para outro `target` é ignorada.
+- A reply sai em `ods.s5.metrics.reply` ou `ods.s5.heatmap.reply`, com o perfil RPL: `correlation_id` é o `message_id` da consulta, e o payload traz `status` `OK`, ou `ERROR` com `error {code, message}`.
+- Consultas não alteram estado, então uma consulta repetida é respondida de novo, em vez de descartada.
+- As consultas leem só métricas `LIVE`.
+
+### Código anterior à 6c
+
+`GenerateHeatmapUseCase`, `GridDensityCalculator`, `HomographyCalibratorAdapter` e a tabela `heatmap_cells` são do fluxo anterior, que aplicava a homografia no próprio S5 e normalizava a densidade entre 0 e 1. Continuam no código apenas para a rota REST de depuração.
 
 ## 🗄️ S5.4 — Time-Series Store (DuckDB)
 
@@ -197,7 +235,8 @@ O `AggregateZoneMetricsUseCase`, com janelas móveis terminando em um instante d
 | :--- | :--- |
 | `occupancy_metrics` | `zone_id`, `granularity`, `start_time`, `end_time`, `dwell_time_avg`, `occupancy_peak`, `total_count`, `occupancy_avg`, `mode`, `session_id` |
 | `event_metrics` | `event_type`, `zone_id`, `object_class`, `granularity`, `start_time`, `end_time`, `count`, `uncertain_count`, `duration_avg_ms`, `mode`, `session_id` |
-| `heatmap_cells` | `grid_id`, `timestamp`, `x`, `y`, `density` |
+| `presence_cells` | `mode`, `session_id`, `space_kind`, `space_key`, `object_class`, `cell_x`, `cell_y`, `bucket_start`, `seconds` |
+| `heatmap_cells` | `grid_id`, `timestamp`, `x`, `y`, `density` (fluxo anterior à 6c) |
 
 **Rollup:** `DownsamplingRollupWorker.run(zone_id, reference_time)` encadeia `1s → 1m → 15m → 1h`. Ele deve ser disparado por um cron externo. Em cada salto, `DownsamplingService` consolida as métricas finas assim:
 - `total_count`: soma;
@@ -209,7 +248,7 @@ Cada métrica é gravada com o `mode` (`LIVE` ou `REPLAY`) e o `session_id` que 
 
 Bancos criados antes de `occupancy_avg`, `mode` e `session_id` existirem recebem as colunas na abertura, com `0` e `LIVE` nas linhas já gravadas.
 
-**API REST** (`create_metrics_query_router(repository)`, prefixo `/api/v5`):
+**API REST de depuração** (`create_metrics_query_router(repository)`, prefixo `/api/v5`). As aplicações consultam o S5 pelo barramento (S5.3); a API serve para inspecionar o banco durante o desenvolvimento:
 
 | Método | Rota | Parâmetros | Resposta |
 | :--- | :--- | :--- | :--- |
@@ -260,10 +299,11 @@ curl "http://localhost:8000/api/v5/heatmaps/grid-1?start_time=2026-10-09T00:00:0
 
 | Verificação | Resultado |
 | :--- | :--- |
-| `pytest` (unitários + integração) | 155/155 aprovados |
+| `pytest` (unitários + integração) | 196/196 aprovados |
 | Invariantes de domínio | Coordenadas não finitas, janelas invertidas, densidades negativas, matrizes fora de 3×3, IDs vazios, envelopes fora do contrato e `EXIT` sem `dwell_s` lançam exceções específicas de `DomainError` |
 | Contrato de entrada | Exemplos de `ods.s1.zone_transition`, `ods.s1.zone_occupancy` e `ods.s2.event` da Especificação 1.0, deduplicação por `message_id` e regra de MAJOR.MINOR |
 | Contrato de saída | `ods.s5.zone_metrics` e `ods.s5.event_metrics` com envelope EV-SERVIÇO; fluxo de ponta a ponta pelo barramento em memória |
 | Sessão e replay | Reinício do estado por `ods.session.started`, relógio de captura em replay, pausa, `LOOP` com nova sessão e separação LIVE/REPLAY no DuckDB |
+| Consultas | `ods.s5.metrics.query` e `ods.s5.heatmap.query` com os exemplos da especificação, códigos de erro, reply RPL e ciclo completo pelo barramento em memória |
 | Persistência DuckDB | Escrita e consulta por zona, granularidade e intervalo de tempo |
 | API HTTP | Rotas `/api/v5/metrics` e `/api/v5/heatmaps` testadas via `TestClient` |

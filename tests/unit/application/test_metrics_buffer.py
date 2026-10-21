@@ -4,6 +4,7 @@ from src.application.state.metrics_buffer import MetricsBuffer
 from src.application.use_cases.ingest_envelope_use_case import IngestEnvelopeUseCase
 from src.domain.services.message_deduplicator import MessageDeduplicator
 from tests.fixtures.spec_examples import (
+    position,
     REPLAY_SESSION_ID,
     SESSION_ID,
     in_session,
@@ -91,3 +92,24 @@ def test_replay_state_avanca_o_watermark_sem_guardar_mensagem():
 
     assert buffer.session.watermark == datetime(2026, 9, 23, 14, 29, 59)
     assert buffer.transitions == [] and buffer.samples == []
+
+
+def test_posicoes_vao_para_o_acumulador_de_presenca():
+    ingest = _ingest()
+    buffer = MetricsBuffer()
+    buffer.add(ingest.execute(position()))
+    later = in_session(position(), SESSION_ID, "m-pos-2", "2026-09-23T14:30:00.370Z")
+    buffer.add(ingest.execute(later))
+
+    drained = buffer.presence.drain(SESSION_ID, datetime(2026, 9, 23, 14, 31))
+    assert [round(v, 3) for v in drained.values()] == [0.5]
+
+
+def test_modo_da_sessao_anunciada_e_lembrado_depois_que_ela_termina():
+    ingest = _ingest()
+    buffer = MetricsBuffer()
+    buffer.add(ingest.execute(replay_session_started()))
+    buffer.add(ingest.execute(zone_occupancy()))
+
+    assert buffer.mode_of(REPLAY_SESSION_ID) == "REPLAY"
+    assert buffer.mode_of(SESSION_ID) == "LIVE"
