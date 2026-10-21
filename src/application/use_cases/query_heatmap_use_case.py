@@ -1,5 +1,3 @@
-import math
-
 from src.application.use_cases.query_metrics_use_case import INVALID_QUERY, parse_period
 from src.domain.exceptions import QueryRejectedError
 from src.domain.repositories.i_time_series_repository import ITimeSeriesRepository
@@ -14,8 +12,9 @@ class QueryHeatmapUseCase:
 
     Em metros, pede space_id e cell_size_m; em instalação sem calibração, source_id e
     cell_size_px. A presença é guardada em células finas (0,1 m ou 10 px) e agrupada aqui
-    no tamanho pedido, que precisa ser pelo menos a resolução base. A grade cobre só o
-    retângulo com presença: origin é o canto da primeira célula e cells[y][x] os segundos.
+    no tamanho pedido, que precisa ser um múltiplo da resolução base: assim cada célula
+    fina cai inteira em uma célula pedida. A grade cobre só o retângulo com presença:
+    origin é o canto da primeira célula e cells[y][x] os segundos.
 
     Grades acima de 200×200 deveriam ir por heatmap_uri; o S5 ainda não tem onde guardar
     o arquivo, então recusa com GRID_TOO_LARGE e pede célula maior.
@@ -29,9 +28,12 @@ class QueryHeatmapUseCase:
         cell_size = payload[size_field]
         if isinstance(cell_size, bool) or not isinstance(cell_size, (int, float)):
             raise QueryRejectedError(INVALID_QUERY, f"{size_field} deve ser numérico.")
-        if cell_size < BASE_CELL_SIZE[kind]:
+        cells_per_group = _cells_per_group(cell_size, BASE_CELL_SIZE[kind])
+        if cells_per_group is None:
             raise QueryRejectedError(
-                INVALID_QUERY, f"{size_field} deve ser no mínimo {BASE_CELL_SIZE[kind]}."
+                INVALID_QUERY,
+                f"{size_field} deve ser múltiplo de {BASE_CELL_SIZE[kind]} (ex.: "
+                f"{BASE_CELL_SIZE[kind] * 5:g}), recebido {cell_size}.",
             )
         period = parse_period(payload)
 
@@ -40,7 +42,7 @@ class QueryHeatmapUseCase:
         )
         totals: dict[tuple[int, int], float] = {}
         for cell_x, cell_y, seconds in fine_cells:
-            key = (_group(cell_x, kind, cell_size), _group(cell_y, kind, cell_size))
+            key = (cell_x // cells_per_group, cell_y // cells_per_group)
             totals[key] = totals.get(key, 0.0) + seconds
 
         if not totals:
@@ -78,10 +80,13 @@ class QueryHeatmapUseCase:
         )
 
 
-def _group(fine_index: int, kind: str, cell_size: float) -> int:
-    """Índice da célula pedida que contém a célula fina, pelo canto inferior dela. Quando o
-    tamanho pedido é múltiplo da base, a conta é inteira e não sofre arredondamento."""
-    ratio = cell_size / BASE_CELL_SIZE[kind]
-    if abs(ratio - round(ratio)) < 1e-9:
-        return fine_index // round(ratio)
-    return math.floor(fine_index / ratio + 1e-9)
+
+def _cells_per_group(cell_size: float, base: float) -> int | None:
+    """Quantas células finas cabem em cada lado da célula pedida, ou None se o tamanho
+    pedido não for um múltiplo inteiro e positivo da resolução base. A tolerância cobre
+    o arredondamento binário de valores como 0.3 / 0.1 = 2.9999…"""
+    ratio = cell_size / base
+    count = round(ratio)
+    if count < 1 or abs(ratio - count) > 1e-9:
+        return None
+    return count

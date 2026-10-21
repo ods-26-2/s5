@@ -67,10 +67,21 @@ def test_deve_recusar_grade_acima_de_200_por_200():
     assert error.value.code == "GRID_TOO_LARGE"
 
 
-@pytest.mark.parametrize("change", [{"cell_size_m": 0.05}, {"cell_size_m": "0.5"}, {"space_id": None}])
+@pytest.mark.parametrize(
+    "change",
+    [{"cell_size_m": 0.05}, {"cell_size_m": 0.25}, {"cell_size_m": 0}, {"cell_size_m": "0.5"}, {"space_id": None}],
+)
 def test_deve_recusar_consulta_invalida(change):
     payload = heatmap_query()["payload"]
     payload.update(change)
     with pytest.raises(QueryRejectedError) as error:
         QueryHeatmapUseCase(FakeTimeSeriesRepository()).execute(payload)
     assert error.value.code == "INVALID_QUERY"
+
+
+def test_deve_aceitar_multiplo_que_tem_arredondamento_binario():
+    # 0.3 / 0.1 dá 2.9999… em ponto flutuante; continua sendo um múltiplo válido.
+    payload = heatmap_query()["payload"]
+    payload["cell_size_m"] = 0.3
+    reply = QueryHeatmapUseCase(_repository((5, 0, 2.0), (6, 0, 3.0))).execute(payload)
+    assert reply["cells"] == [[2, 3]]

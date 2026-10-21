@@ -31,13 +31,32 @@ def test_deve_guardar_contexto_da_zona_e_versao_das_regras():
     assert buffer.rules_versions["PPE_NON_COMPLIANT"] == "rules-a5-3"
 
 
-def test_deve_descartar_antigos_mas_manter_ultima_amostra_e_evento_aberto():
+def test_deve_descartar_antigos_mas_manter_ultima_amostra_de_cada_zona():
     buffer = _buffer()
     buffer.prune(before=datetime(2026, 9, 24))
 
     assert buffer.transitions == []
     assert [s.zone_id for s in buffer.samples] == ["vaga-12"]
-    assert len(buffer.events) == 1
+
+
+def test_evento_sem_encerramento_e_sem_publicacao_recente_sai_do_buffer():
+    buffer = _buffer()
+    buffer.prune(before=datetime(2026, 9, 24))
+
+    assert buffer.events == []
+
+
+def test_evento_ativo_fica_inteiro_enquanto_tiver_publicacao_recente():
+    ingest = _ingest()
+    buffer = _buffer()
+    update = qualified_event()
+    update.update(message_id="m-update", captured_at="2026-09-24T10:00:00.000Z")
+    update["payload"].update(phase="UPDATED", duration_ms=70_208_000)
+    buffer.add(ingest.execute(update))
+
+    buffer.prune(before=datetime(2026, 9, 24))
+
+    assert [e.phase for e in buffer.events] == ["STARTED", "UPDATED"]
 
 
 def _ingest():

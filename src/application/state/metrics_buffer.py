@@ -3,7 +3,7 @@ from datetime import datetime
 
 from src.application.use_cases.ingest_envelope_use_case import IngestedMessage
 from src.domain.entities.position_sample import PositionSample
-from src.domain.entities.qualified_event import ENDED, QualifiedEvent
+from src.domain.entities.qualified_event import QualifiedEvent
 from src.domain.entities.replay_state import ReplayState
 from src.domain.entities.session_start import LIVE, SessionStart
 from src.domain.entities.zone_occupancy_sample import ZoneOccupancySample
@@ -107,8 +107,13 @@ class MetricsBuffer:
 
     def prune(self, before: datetime) -> None:
         """Descarta o que ficou antes de `before`, preservando a última amostra de ocupação
-        de cada zona (ela é a contagem vigente no início da próxima janela) e todo evento
-        de S2 ainda não encerrado, cujo started_at pode ser antigo."""
+        de cada zona (ela é a contagem vigente no início da próxima janela).
+
+        Um evento de S2 é tratado como um todo: fica com todas as suas publicações enquanto
+        alguma delas for recente, porque um evento longo e ainda ativo tem started_at antigo.
+        Quando a última publicação dele também é anterior a `before`, o evento sai, tenha
+        ou não recebido ENDED; sem isso, um evento que o S2 nunca encerrasse ficaria na
+        memória para sempre."""
         self.transitions = [t for t in self.transitions if t.occurred_at >= before]
 
         last_sample_before: dict[str, ZoneOccupancySample] = {}
@@ -119,10 +124,8 @@ class MetricsBuffer:
             s for s in self.samples if s.observed_at >= before
         ]
 
-        ended_ids = {e.event_id for e in self.events if e.phase == ENDED and e.occurred_at < before}
-        self.events = [
-            e for e in self.events if e.occurred_at >= before or e.event_id not in ended_ids
-        ]
+        active_ids = {e.event_id for e in self.events if e.occurred_at >= before}
+        self.events = [e for e in self.events if e.event_id in active_ids]
 
     def _start_session(self, start: SessionStart) -> None:
         if start.previous_session_id:
