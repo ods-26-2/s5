@@ -1,0 +1,20 @@
+# O endereço do broker não tem valor padrão de propósito: o broker do projeto é pago e
+# compartilhado, então subir o serviço não deve ligá-lo a ele sem que alguém peça.
+#   S5_KAFKA_BROKERS=<host:porta> docker compose up -d --build
+# Sem a variável, o S5 sobe com o barramento em memória.
+services:
+  s5-metrics:
+    build: .
+    image: ods/s5-metrics:0.1.0
+    container_name: s5-metrics
+    environment:
+      S5_KAFKA_BROKERS: ${S5_KAFKA_BROKERS:-}
+      S5_KAFKA_GROUP_ID: ${S5_KAFKA_GROUP_ID:-S5-metricas}
+    ports:
+      - "8000:8000"
+    volumes:
+      - s5_data:/data
+    restart: unless-stopped
+
+volumes:
+  s5_data:

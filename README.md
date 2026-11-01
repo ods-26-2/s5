@@ -15,7 +15,11 @@ s5/
 ├── README.md                   # Documentação do componente
 ├── app.py                      # Ponto de entrada do serviço (uvicorn app:app)
 ├── seed.py                     # Dados de exemplo para a API de depuração
-├── requirements.txt            # Dependências com versões fixadas
+├── requirements.txt            # Dependências de execução, com versões fixadas
+├── requirements-dev.txt        # Dependências dos testes
+├── Dockerfile                  # Imagem do serviço
+├── docker-compose.yml          # Sobe o serviço com um volume para o banco
+├── scripts/                    # Teste curto da consulta em um broker Kafka
 ├── pytest.ini                  # Configuração dos testes (pythonpath = .)
 ├── contracts/                  # JSON Schemas e exemplos das mensagens do S5
 ├── src/
@@ -278,8 +282,16 @@ Bancos criados antes de `occupancy_avg`, `mode`, `session_id` e `stored_at` exis
 cd s5
 python3 -m venv .venv
 source .venv/bin/activate
-pip install -r requirements.txt
+pip install -r requirements-dev.txt
 ```
+
+### Docker
+
+```bash
+S5_KAFKA_BROKERS=<host:porta> docker compose up -d --build
+```
+
+O endereço do broker não tem valor padrão de propósito: sem `S5_KAFKA_BROKERS`, o S5 sobe com o barramento em memória. A imagem foi testada em amd64; a execução na Jetson (arm64) ainda não foi verificada.
 
 ### Testes
 
@@ -309,9 +321,13 @@ S5_KAFKA_BROKERS=<host:porta> uvicorn app:app               # barramento Kafka
 # http://localhost:8000/docs
 ```
 
-O broker do projeto é pago e compartilhado pelos 15 squads. Faça testes curtos e supervisionados, e encerre o processo ao terminar.
+O broker do projeto é pago e compartilhado pelos 15 squads. Faça testes curtos e supervisionados, e encerre o processo ao terminar. Para testar a leitura e a escrita sem publicar em tópicos de outros componentes, com o S5 rodando há pelo menos 15 s no mesmo broker:
 
-Para ter dados de exemplo (zona `vaga-12`, evento `PPE_NON_COMPLIANT` e presença em `patio-1`, em 2026-10-09 das 14h às 15h UTC), rode antes `python seed.py` e consulte:
+```bash
+python scripts/smoke_kafka_query.py <host:porta>
+```
+
+Para ter dados de exemplo (zona `vaga-12`, evento `PPE_NON_COMPLIANT` e presença em `patio-1`, em 2026-10-09 das 14h às 15h UTC), rode antes `python seed.py`, com o serviço parado, porque o DuckDB só aceita um processo por arquivo. Depois consulte:
 
 ```bash
 P="period_start_at=2026-10-09T14:00:00.000Z&period_end_at=2026-10-09T15:00:00.000Z"
