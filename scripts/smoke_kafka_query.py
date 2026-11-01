@@ -2,9 +2,12 @@
 
 Prova leitura e escrita sem publicar em tópicos que outros componentes consomem, porque só
 o S5 atende ods.s5.metrics.query. Cria os dois tópicos da consulta se não existirem e termina
-sozinho em no máximo 1 minuto.
+sozinho em no máximo 1 minuto e meio.
 
-Com o S5 rodando no mesmo broker há pelo menos 15 s (ele começa em `latest`):
+A consulta é reenviada a cada 15 s: o S5 começa em `latest` e leva até 30 s para descobrir um
+tópico novo, então as primeiras podem ser enviadas antes de ele estar lendo.
+
+Com o S5 rodando no mesmo broker:
     python scripts/smoke_kafka_query.py <host:porta>
 """
 
@@ -19,8 +22,8 @@ from confluent_kafka.admin import AdminClient, NewTopic
 
 QUERY_TOPIC = "ods.s5.metrics.query"
 REPLY_TOPIC = "ods.s5.metrics.reply"
-REPLY_TIMEOUT_SECONDS = 45
-READER_WARMUP_POLLS = 10
+REPLY_TIMEOUT_SECONDS = 75
+RESEND_SECONDS = 15
 
 
 def create_topics(brokers: str) -> None:
@@ -60,35 +63,39 @@ def main(brokers: str) -> int:
         {
             "bootstrap.servers": brokers,
             "group.id": f"S5-smoke-{uuid.uuid4()}",
-            "auto.offset.reset": "latest",
+            # earliest: a reply não se perde se o leitor entrar no grupo depois dela. Replies
+            # antigas são ignoradas pelo correlation_id.
+            "auto.offset.reset": "earliest",
             "enable.auto.commit": False,
         }
     )
     reader.subscribe([REPLY_TOPIC])
-    for _ in range(READER_WARMUP_POLLS):
-        reader.poll(1.0)
-
-    query = build_query()
-    started = time.monotonic()
     producer = Producer({"bootstrap.servers": brokers})
-    producer.produce(QUERY_TOPIC, value=json.dumps(query).encode("utf-8"))
-    producer.flush(10)
-
+    sent: dict[str, float] = {}
+    started = time.monotonic()
+    last_sent = None
     reply = None
     while reply is None and time.monotonic() - started < REPLY_TIMEOUT_SECONDS:
+        if last_sent is None or time.monotonic() - last_sent >= RESEND_SECONDS:
+            query = build_query()
+            producer.produce(QUERY_TOPIC, value=json.dumps(query).encode("utf-8"))
+            producer.flush(10)
+            last_sent = time.monotonic()
+            sent[query["message_id"]] = last_sent
         record = reader.poll(1.0)
         if record is None or record.error():
             continue
         message = json.loads(record.value())
-        if message.get("correlation_id") == query["message_id"]:
+        if message.get("correlation_id") in sent:
             reply = message
     reader.close()
 
     if reply is None:
-        print(f"FALHOU: sem reply em {REPLY_TIMEOUT_SECONDS} s. O S5 está rodando neste broker há 15 s?")
+        print(f"FALHOU: sem reply em {REPLY_TIMEOUT_SECONDS} s, com {len(sent)} consultas enviadas. O S5 está rodando neste broker?")
         return 1
     payload = reply["payload"]
-    print(f"OK: reply em {time.monotonic() - started:.1f} s, status {payload['status']}, schema {reply['schema']}")
+    latency = time.monotonic() - sent[reply["correlation_id"]]
+    print(f"OK: reply em {latency:.1f} s, {len(sent)}ª consulta, após {time.monotonic() - started:.0f} s; status {payload['status']}, schema {reply['schema']}")
     return 0 if payload["status"] == "OK" else 1
 
 

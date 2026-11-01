@@ -110,6 +110,7 @@ def test_deve_configurar_o_cliente_e_assinar_os_topicos():
         "group.id": "S5-metricas",
         "client.id": "s5",
         "auto.offset.reset": "latest",
+        "topic.metadata.refresh.interval.ms": 30000,
     }
     assert producers[0].config["bootstrap.servers"] == "broker:9093"
 
