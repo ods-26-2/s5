@@ -2,6 +2,7 @@
 # Ao atualizar uma versão, rode a suíte completa antes de mudar este arquivo.
 
 # Execução
+confluent-kafka==2.6.1
 duckdb==1.5.6
 fastapi==0.143.0
 jsonschema==4.23.0

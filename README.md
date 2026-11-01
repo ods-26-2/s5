@@ -36,7 +36,7 @@ s5/
 │   │   ├── ports/              # IEventPublisher (publicação no B3)
 │   │   └── state/              # MetricsBuffer (mensagens das janelas abertas e sessão)
 │   ├── infrastructure/         # 3. Adaptadores e integrações externas
-│   │   ├── b3_bus/             # Consumidor/publicador do B3 (contrato + in-memory) e assinaturas do S5
+│   │   ├── b3_bus/             # Barramento B3: Kafka, em memória e assinaturas do S5
 │   │   ├── contracts/          # ContractValidator e ValidatingPublisher
 │   │   ├── database/           # DuckDBTimeSeriesRepository
 │   │   └── workers/            # MetricsWindowWorker
@@ -133,7 +133,12 @@ Não há debounce nem histerese no S5: na 6c, a histerese é do S1, configurada 
 - Os tópicos são independentes, então mensagens do S1 e do S2 podem chegar antes do anúncio da sessão. Nesse caso a sessão é adotada como `LIVE`, com início no primeiro `captured_at` recebido. O anúncio, quando chega, só completa o modo e o início, sem descartar o que já foi recebido.
 - `ods.p6.replay.state` não vira métrica: ele só faz andar o relógio de captura da sessão de replay.
 
-O `InMemoryB3EventConsumer` implementa os contratos `B3EventConsumer` e `IEventPublisher` sem broker real: o que é publicado é entregue aos handlers do mesmo processo. Ele serve para desenvolvimento e testes e é o ponto de troca por um cliente Pub/Sub de verdade. O contrato espelha o consumidor usado no S4 (C++).
+**Barramento:** dois adaptadores implementam os contratos `B3EventConsumer` e `IEventPublisher`.
+
+- `KafkaB3Bus` (`confluent-kafka`) segue o Guia de Uso do Kafka: um tópico por schema, `group.id` próprio, poll de 1 s e endereço do broker sempre vindo de configuração. Mensagem que não é JSON de um objeto é descartada e registrada no log. Erro em um handler não interrompe a leitura.
+- `InMemoryB3EventConsumer` entrega o que é publicado aos handlers do mesmo processo. Serve para desenvolvimento e testes.
+
+Sem posição salva, o grupo Kafka começa em `latest`: o S5 acompanha o presente, e ler o histórico inteiro responderia a consultas antigas e recalcularia métricas de sessões encerradas. As mensagens chegam em uma thread própria; um lock protege o buffer contra o fechamento de janelas, e o repositório usa um cursor DuckDB por thread.
 
 ## 📊 S5.2 — Motor de Agregação e publicação
 
@@ -141,7 +146,7 @@ O `InMemoryB3EventConsumer` implementa os contratos `B3EventConsumer` e `IEventP
 
 **Disparo:** `MetricsWindowWorker.run()`, chamado por um agendador externo em intervalo menor que a menor janela (ex.: a cada 5 s). Cada disparo fecha as janelas **alinhadas ao relógio UTC** (14:00–14:15, não t−15m–t) de **1m, 15m, 1h e 1d** que terminaram desde o disparo anterior. Disparos extras não publicam nada. Alguns detalhes:
 - uma janela só fecha 2 s depois do seu fim, para acolher a latência entre captura e publicação;
-- janelas perdidas entre dois disparos são fechadas todas, em ordem;
+- janelas perdidas entre dois disparos são fechadas em ordem. Em sessão `LIVE`, a recuperação vai no máximo 1 hora para trás, para não publicar milhares de janelas de uma vez depois de uma parada longa;
 - a cada sessão nova o cursor volta ao início dela, e as janelas ainda abertas da sessão anterior são abandonadas.
 
 **Relógio:** em sessão `LIVE`, o relógio é o de parede. Em `REPLAY`, é o maior `captured_at` recebido na sessão: o tempo de captura reproduzido é o da gravação, que não acompanha a parede e volta em `SEEK` e `LOOP`. P6 publica `ods.p6.replay.state` a cada 1 s em reprodução, o que mantém esse relógio andando mesmo quando nenhuma zona muda. Com o replay pausado, nenhuma janela fecha.
@@ -284,16 +289,27 @@ pytest tests/unit     # somente testes unitários
 pytest tests/contract # somente os exemplos de contracts/
 ```
 
+O teste contra um broker Kafka real só roda com `S5_TEST_KAFKA_BROKERS` definido. Ele cria tópicos e publica mensagens, então use um broker local descartável, nunca o do projeto:
+
+```bash
+docker run -d --rm --name s5-kafka-teste -p 127.0.0.1:9092:9092 apache/kafka:3.9.0
+S5_TEST_KAFKA_BROKERS=localhost:9092 pytest tests/integration/test_kafka_b3_bus_real.py
+docker stop s5-kafka-teste
+```
+
 Os testes unitários usam fakes em memória ([`tests/unit/application/fakes.py`](tests/unit/application/fakes.py)). Os de integração usam DuckDB real (`:memory:`), o `TestClient` do FastAPI e o consumidor B3 em memória. Os de contrato verificam cada exemplo de [`contracts/examples/`](contracts/examples) contra o seu schema.
 
 ### Subindo a API
 
-O ponto de entrada é [`app.py`](app.py). Ele monta o S5 completo por `build_s5` ([`composition.py`](src/composition.py)) sobre o barramento em memória e um `DuckDBTimeSeriesRepository`, fecha as janelas a cada `S5_TICK_SECONDS` (padrão 5), roda o expurgo de retenção a cada `S5_PURGE_SECONDS` (padrão 3600) e expõe a API de depuração. Enquanto não houver cliente de broker real, mensagens só chegam de dentro do processo. O banco padrão é `s5_metrics.db`; para usar outro caminho (ou `:memory:`), defina `S5_DATABASE_PATH`.
+O ponto de entrada é [`app.py`](app.py). Ele monta o S5 completo por `build_s5` ([`composition.py`](src/composition.py)) sobre o barramento em memória e um `DuckDBTimeSeriesRepository`, fecha as janelas a cada `S5_TICK_SECONDS` (padrão 5), roda o expurgo de retenção a cada `S5_PURGE_SECONDS` (padrão 3600) e expõe a API de depuração. O barramento é escolhido por `S5_KAFKA_BROKERS`: com o endereço do broker, usa o Kafka; sem ele, usa o barramento em memória, e mensagens só chegam de dentro do processo. `S5_KAFKA_GROUP_ID` (padrão `S5-metricas`) e `S5_KAFKA_OFFSET_RESET` (padrão `latest`) ajustam o consumidor. O banco padrão é `s5_metrics.db`; para usar outro caminho (ou `:memory:`), defina `S5_DATABASE_PATH`.
 
 ```bash
-uvicorn app:app --reload
+uvicorn app:app --reload                                    # barramento em memória
+S5_KAFKA_BROKERS=<host:porta> uvicorn app:app               # barramento Kafka
 # http://localhost:8000/docs
 ```
+
+O broker do projeto é pago e compartilhado pelos 15 squads. Faça testes curtos e supervisionados, e encerre o processo ao terminar.
 
 Para ter dados de exemplo (zona `vaga-12`, evento `PPE_NON_COMPLIANT` e presença em `patio-1`, em 2026-10-09 das 14h às 15h UTC), rode antes `python seed.py` e consulte:
 
@@ -310,7 +326,8 @@ curl "http://localhost:8000/api/v5/heatmap?space_id=patio-1&cell_size_m=0.5&$P"
 
 | Verificação | Resultado |
 | :--- | :--- |
-| `pytest` (unitários, integração e contrato) | 228/228 aprovados |
+| `pytest` (unitários, integração e contrato) | 242 aprovados; 1 teste de broker real roda à parte |
+| Kafka | Leitura, publicação e consulta contra Kafka 3.9 local em Docker, inclusive com o serviço rodando e janela fechada pelo relógio real. Ainda não testado no broker compartilhado do projeto |
 | Invariantes de domínio | Janelas invertidas, IDs vazios, contagens negativas, enums fora do contrato, coordenadas não finitas, envelopes fora do contrato e `EXIT` sem `dwell_s` lançam exceções específicas de `DomainError` |
 | Contrato de entrada | Exemplos de `ods.s1.zone_transition`, `ods.s1.zone_occupancy`, `ods.s1.position`, `ods.s2.event`, `ods.session.started` e `ods.p6.replay.state` da Especificação 1.0, deduplicação por `message_id` e regra de MAJOR.MINOR |
 | Contrato de saída | `ods.s5.zone_metrics` e `ods.s5.event_metrics` com envelope EV-SERVIÇO; fluxo de ponta a ponta pelo barramento em memória |

@@ -206,3 +206,23 @@ def test_deve_gravar_presenca_dos_minutos_fechados_com_o_modo_da_sessao():
     [(key, seconds, mode)] = repository.saved_presence
     assert (key.space_key, key.cell_x, key.cell_y, mode) == ("patio-1", 34, 71, REPLAY)
     assert seconds == 0.5
+
+
+def test_em_live_a_recuperacao_de_janelas_atrasadas_e_limitada():
+    use_case, _, publisher = _setup()
+
+    use_case.execute(datetime(2026, 9, 25, 10, 0, 2))
+
+    ends = [p["window_end_at"] for p in _payloads(publisher, "ods.s5.zone_metrics")]
+    assert len(ends) == 60
+    assert ends[0] == "2026-09-25T09:01:00.000Z"
+    assert ends[-1] == "2026-09-25T10:00:00.000Z"
+
+
+def test_em_replay_nao_ha_limite_de_recuperacao():
+    use_case, ingest, buffer, _, publisher = _replay_setup()
+    _heartbeat(ingest, buffer, "2026-09-23T16:30:02.500Z", "hb-1")
+
+    use_case.execute(WALL_CLOCK)
+
+    assert len(_payloads(publisher, "ods.s5.zone_metrics")) == 121

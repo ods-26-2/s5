@@ -1,3 +1,4 @@
+import logging
 from datetime import datetime, timedelta
 
 from src.application.messaging.metric_payloads import event_metrics_payload, zone_metrics_payload
@@ -15,6 +16,9 @@ ZONE_METRICS_SCHEMA = "ods.s5.zone_metrics"
 EVENT_METRICS_SCHEMA = "ods.s5.event_metrics"
 DEFAULT_GRANULARITIES = ("1m", "15m", "1h", "1d")
 DEFAULT_GRACE_SECONDS = 2.0
+DEFAULT_MAX_CATCHUP_SECONDS = 3600.0
+
+logger = logging.getLogger(__name__)
 
 
 class CloseMetricWindowsUseCase:
@@ -29,6 +33,10 @@ class CloseMetricWindowsUseCase:
 
     A cada nova sessão o cursor volta ao início dela: as janelas ainda abertas da sessão
     anterior são abandonadas, como o resto do estado daquela sessão.
+
+    Em LIVE, a recuperação de janelas atrasadas é limitada a `max_catchup_seconds`. Depois
+    de uma parada longa, fechar tudo publicaria milhares de janelas de uma vez em um
+    broker pago e compartilhado; as janelas mais antigas que o limite são abandonadas.
     """
 
     def __init__(
@@ -41,6 +49,7 @@ class CloseMetricWindowsUseCase:
         envelope_factory: OutgoingEnvelopeFactory,
         granularities: tuple[str, ...] = DEFAULT_GRANULARITIES,
         grace_seconds: float = DEFAULT_GRACE_SECONDS,
+        max_catchup_seconds: float = DEFAULT_MAX_CATCHUP_SECONDS,
     ) -> None:
         self._buffer = buffer
         self._zone_aggregation = zone_aggregation
@@ -50,6 +59,7 @@ class CloseMetricWindowsUseCase:
         self._envelope_factory = envelope_factory
         self._granularities = granularities
         self._grace = timedelta(seconds=grace_seconds)
+        self._max_catchup = timedelta(seconds=max_catchup_seconds)
         self._cursor_session_id: str | None = None
         self._closed_until: datetime | None = None
 
@@ -63,6 +73,13 @@ class CloseMetricWindowsUseCase:
 
         clock = session.watermark if session.mode == REPLAY else now
         until = clock - self._grace
+        if session.mode != REPLAY and until - self._closed_until > self._max_catchup:
+            logger.warning(
+                "Janelas de %s a %s abandonadas: atraso maior que o limite de recuperação.",
+                self._closed_until,
+                until - self._max_catchup,
+            )
+            self._closed_until = until - self._max_catchup
         if until <= self._closed_until:
             return []
 

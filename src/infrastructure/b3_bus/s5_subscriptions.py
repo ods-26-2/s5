@@ -1,6 +1,6 @@
 import logging
 from collections.abc import Callable
-from typing import Protocol
+from typing import ContextManager, Protocol
 
 from src.domain.exceptions import ODSBaseException
 from src.infrastructure.b3_bus.b3_event_consumer import B3EventConsumer
@@ -27,6 +27,23 @@ def _log_rejected(message: dict, error: ODSBaseException) -> None:
         message.get("message_id"),
         error,
     )
+
+
+class SerializedHandler:
+    """Executa o handler sob um lock, para que a entrada de mensagens no buffer não se
+    misture com o fechamento de janelas, que roda em outra thread."""
+
+    def __init__(self, handler: MessageHandler, lock: ContextManager) -> None:
+        self._handler = handler
+        self._lock = lock
+
+    @property
+    def supported_schemas(self) -> tuple[str, ...]:
+        return self._handler.supported_schemas
+
+    def execute(self, raw_message: dict) -> object:
+        with self._lock:
+            return self._handler.execute(raw_message)
 
 
 def subscribe_s5(

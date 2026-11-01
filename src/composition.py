@@ -5,6 +5,7 @@ por um cliente de broker real (MQTT, NATS…) só exige passar outro objeto que 
 B3EventConsumer e IEventPublisher.
 """
 
+import threading
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
@@ -28,7 +29,7 @@ from src.domain.services.event_metrics_aggregation import EventMetricsAggregatio
 from src.domain.services.message_deduplicator import MessageDeduplicator
 from src.domain.value_objects.retention_policy import RetentionPolicy
 from src.infrastructure.b3_bus.b3_event_consumer import B3EventConsumer
-from src.infrastructure.b3_bus.s5_subscriptions import subscribe_s5
+from src.infrastructure.b3_bus.s5_subscriptions import SerializedHandler, subscribe_s5
 from src.infrastructure.contracts.contract_validator import (
     ContractValidator,
     ValidatingPublisher,
@@ -73,7 +74,14 @@ def build_s5(
     factory = OutgoingEnvelopeFactory()
     buffer = MetricsBuffer()
 
-    subscribe_s5(bus, HandleBusMessageUseCase(IngestEnvelopeUseCase(MessageDeduplicator()), buffer))
+    buffer_lock = threading.RLock()
+    subscribe_s5(
+        bus,
+        SerializedHandler(
+            HandleBusMessageUseCase(IngestEnvelopeUseCase(MessageDeduplicator()), buffer),
+            buffer_lock,
+        ),
+    )
     subscribe_s5(
         bus,
         AnswerQueryUseCase(
@@ -94,6 +102,7 @@ def build_s5(
         factory,
         granularities=granularities,
     )
-    worker = MetricsWindowWorker(close_windows, clock) if clock else MetricsWindowWorker(close_windows)
+    clock_option = {"clock": clock} if clock else {}
+    worker = MetricsWindowWorker(close_windows, lock=buffer_lock, **clock_option)
     purge = PurgeExpiredDataUseCase(repository, retention or RetentionPolicy())
     return S5Service(buffer=buffer, worker=worker, purge=purge)

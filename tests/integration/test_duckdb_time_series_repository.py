@@ -1,3 +1,4 @@
+import threading
 from datetime import datetime, timedelta
 
 import duckdb
@@ -224,3 +225,34 @@ def test_banco_sem_stored_at_recebe_a_coluna_com_o_instante_da_migracao(tmp_path
     assert repository.delete_replay_stored_before(datetime(2026, 10, 21, 11)) == 0
     assert repository.query_presence("METERS", "p", hour, mode="REPLAY") == [(1, 1, 2.0)]
     assert repository.delete_replay_stored_before(datetime(2026, 10, 21, 13)) == 1
+
+
+def test_varias_threads_podem_gravar_e_ler_no_mesmo_repositorio():
+    repository = DuckDBTimeSeriesRepository(":memory:")
+    base_time = datetime(2026, 9, 23, 14, 0, 0)
+    failures = []
+
+    def work(zone: int) -> None:
+        try:
+            for minute in range(50):
+                window = TimeWindow(
+                    start_time=base_time + timedelta(minutes=minute),
+                    end_time=base_time + timedelta(minutes=minute + 1),
+                )
+                repository.save_occupancy_metric(
+                    OccupancyMetric(zone_id=f"z-{zone}", window=window, dwell_time_avg=1.0, occupancy_peak=1, total_count=1),
+                    "1m",
+                )
+                repository.query_zone_series(window, "1m", zone_id=f"z-{zone}")
+        except Exception as error:  # a falha precisa chegar à thread do teste
+            failures.append(error)
+
+    threads = [threading.Thread(target=work, args=(zone,)) for zone in range(4)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    day = TimeWindow(start_time=base_time, end_time=base_time + timedelta(days=1))
+    assert failures == []
+    assert len(repository.query_zone_series(day, "1m")) == 200

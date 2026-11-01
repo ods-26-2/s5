@@ -1,3 +1,4 @@
+import threading
 from collections.abc import Callable
 from datetime import datetime, timedelta, timezone
 
@@ -24,14 +25,27 @@ class DuckDBTimeSeriesRepository(ITimeSeriesRepository):
 
     Toda linha guarda stored_at, o instante UTC em que foi gravada. É por ele que os dados
     de replay expiram, já que o tempo de captura deles é o da gravação reproduzida.
+
+    O repositório é usado por várias threads (leitura do Kafka, fechamento de janelas, API).
+    Uma conexão DuckDB não é segura entre threads, então cada thread usa o próprio cursor,
+    como a documentação do DuckDB recomenda; todos enxergam o mesmo banco.
     """
 
     def __init__(
         self, database_path: str = ":memory:", clock: Callable[[], datetime] = _utc_now
     ) -> None:
-        self._connection = duckdb.connect(database_path)
+        self._root_connection = duckdb.connect(database_path)
+        self._thread_local = threading.local()
         self._clock = clock
         self._create_schema()
+
+    @property
+    def _connection(self) -> duckdb.DuckDBPyConnection:
+        cursor = getattr(self._thread_local, "cursor", None)
+        if cursor is None:
+            cursor = self._root_connection.cursor()
+            self._thread_local.cursor = cursor
+        return cursor
 
     def _create_schema(self) -> None:
         self._connection.execute(

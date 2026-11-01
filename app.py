@@ -1,9 +1,12 @@
 """Ponto de entrada do S5 (Métricas e Séries Temporais).
 
-Sobe o serviço completo sobre o barramento em memória: assina os tópicos de entrada e de
+Sobe o serviço completo: assina os tópicos de entrada e de
 consulta, fecha as janelas a cada S5_TICK_SECONDS, apaga o que passou do prazo de
 retenção a cada S5_PURGE_SECONDS e expõe a API REST de depuração.
-Enquanto não houver cliente de broker real, mensagens só chegam de dentro do processo.
+
+Com S5_KAFKA_BROKERS definido, o barramento é o Kafka nesse endereço. Sem ele, é o barramento
+em memória, e mensagens só chegam de dentro do processo. Outras variáveis: S5_KAFKA_GROUP_ID
+e S5_KAFKA_OFFSET_RESET.
 
 Uso: uvicorn app:app --reload
 """
@@ -18,6 +21,7 @@ from fastapi import FastAPI
 
 from src.composition import build_s5
 from src.infrastructure.b3_bus.b3_event_consumer import InMemoryB3EventConsumer
+from src.infrastructure.b3_bus.kafka_b3_bus import DEFAULT_GROUP_ID, DEFAULT_OFFSET_RESET, KafkaB3Bus
 from src.infrastructure.database.duckdb_time_series_repository import DuckDBTimeSeriesRepository
 from src.presentation.http.metrics_query_controller import create_metrics_query_router
 
@@ -25,7 +29,16 @@ logging.basicConfig(level=logging.INFO, format="%(levelname)s:     %(name)s: %(m
 logger = logging.getLogger("s5")
 
 repository = DuckDBTimeSeriesRepository(os.getenv("S5_DATABASE_PATH", "s5_metrics.db"))
-bus = InMemoryB3EventConsumer()
+kafka_brokers = os.getenv("S5_KAFKA_BROKERS", "").strip()
+bus = (
+    KafkaB3Bus(
+        kafka_brokers,
+        group_id=os.getenv("S5_KAFKA_GROUP_ID", DEFAULT_GROUP_ID),
+        auto_offset_reset=os.getenv("S5_KAFKA_OFFSET_RESET", DEFAULT_OFFSET_RESET),
+    )
+    if kafka_brokers
+    else InMemoryB3EventConsumer()
+)
 service = build_s5(bus, bus, repository)
 tick_seconds = float(os.getenv("S5_TICK_SECONDS", "5"))
 purge_seconds = float(os.getenv("S5_PURGE_SECONDS", "3600"))
@@ -39,7 +52,8 @@ def _purge_expired() -> None:
 async def _run_periodically(task, interval_seconds: float, failure_message: str) -> None:
     while True:
         try:
-            task()
+            # Em outra thread: o evento de loop continua atendendo a API durante o disparo.
+            await asyncio.to_thread(task)
         except Exception:  # um disparo com erro não pode parar os seguintes
             logger.exception(failure_message)
         await asyncio.sleep(interval_seconds)
