@@ -142,7 +142,7 @@ Não há debounce nem histerese no S5: na 6c, a histerese é do S1, configurada 
 - `KafkaB3Bus` (`confluent-kafka`) segue o Guia de Uso do Kafka: um tópico por schema, `group.id` próprio, poll de 1 s e endereço do broker sempre vindo de configuração. Mensagem que não é JSON de um objeto é descartada e registrada no log. Erro em um handler não interrompe a leitura.
 - `InMemoryB3EventConsumer` entrega o que é publicado aos handlers do mesmo processo. Serve para desenvolvimento e testes.
 
-Sem posição salva, o grupo Kafka começa em `latest`: o S5 acompanha o presente, e ler o histórico inteiro responderia a consultas antigas e recalcularia métricas de sessões encerradas. As mensagens chegam em uma thread própria; um lock protege o buffer contra o fechamento de janelas, e o repositório usa um cursor DuckDB por thread.
+Sem posição salva, o grupo Kafka começa em `latest`: o S5 acompanha o presente, e ler o histórico inteiro responderia a consultas antigas e recalcularia métricas de sessões encerradas. A lista de tópicos é atualizada a cada 30 s (o padrão do Kafka é 5 min), então um tópico criado com o S5 já no ar é descoberto em até 30 s; o que for publicado nele antes disso é perdido para o S5. As mensagens chegam em uma thread própria; um lock protege o buffer contra o fechamento de janelas, e o repositório usa um cursor DuckDB por thread.
 
 ## 📊 S5.2 — Motor de Agregação e publicação
 
@@ -321,7 +321,7 @@ S5_KAFKA_BROKERS=<host:porta> uvicorn app:app               # barramento Kafka
 # http://localhost:8000/docs
 ```
 
-O broker do projeto é pago e compartilhado pelos 15 squads. Faça testes curtos e supervisionados, e encerre o processo ao terminar. Para testar a leitura e a escrita sem publicar em tópicos de outros componentes, com o S5 rodando há pelo menos 15 s no mesmo broker:
+O broker do projeto é pago e compartilhado pelos 15 squads. Faça testes curtos e supervisionados, e encerre o processo ao terminar. Para testar a leitura e a escrita sem publicar em tópicos de outros componentes, com o S5 rodando no mesmo broker:
 
 ```bash
 python scripts/smoke_kafka_query.py <host:porta>

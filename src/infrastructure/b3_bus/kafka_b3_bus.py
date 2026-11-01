@@ -15,6 +15,10 @@ DEFAULT_CLIENT_ID = "s5"
 DEFAULT_OFFSET_RESET = "latest"
 # O guia do Kafka pede poll de pelo menos 1 s: o broker é pago e compartilhado.
 MIN_POLL_SECONDS = 1.0
+# Com o padrão do Kafka (5 min), um tópico criado depois da assinatura levaria minutos para
+# ser descoberto: medido em 210 s para um tópico criado 90 s após assinar. Os tópicos ods.s1.*
+# nascem quando o S1 começa a publicar, com o S5 possivelmente já no ar.
+TOPIC_REFRESH_MS = 30_000
 FLUSH_SECONDS = 5.0
 JOIN_SECONDS = 10.0
 
@@ -26,6 +30,8 @@ class KafkaB3Bus(B3EventConsumer, IEventPublisher):
     As mensagens são lidas em uma thread própria e os handlers executam nela. Sem posição
     salva, o grupo começa em `latest`: o S5 acompanha o presente, e ler o histórico
     inteiro responderia a consultas antigas e recalcularia métricas de sessões encerradas.
+    Por isso, o que for publicado em um tópico novo antes de o S5 descobri-lo (até 30 s) é
+    perdido para o S5.
 
     Mensagem que não é JSON de um objeto é descartada e registrada (1º nível de validação
     do guia); os níveis seguintes são dos handlers. Erro em um handler é registrado e não
@@ -51,6 +57,7 @@ class KafkaB3Bus(B3EventConsumer, IEventPublisher):
             "group.id": group_id,
             "client.id": client_id,
             "auto.offset.reset": auto_offset_reset,
+            "topic.metadata.refresh.interval.ms": TOPIC_REFRESH_MS,
         }
         self._producer_config = {
             "bootstrap.servers": bootstrap_servers,
