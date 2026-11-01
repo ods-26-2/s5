@@ -4,10 +4,14 @@ from dataclasses import dataclass
 from src.application.parsers.envelope_parser import (
     EV_SERVICO_FIELDS,
     EV_SINAL_FIELDS,
+    EV_SINAL_SESSION_FIELDS,
     parse_envelope,
     parse_utc_timestamp,
 )
+from src.domain.entities.position_sample import PositionSample, TrackPosition
 from src.domain.entities.qualified_event import QualifiedEvent
+from src.domain.entities.replay_state import ReplayState
+from src.domain.entities.session_start import SessionStart
 from src.domain.entities.zone_occupancy_sample import ZoneOccupancySample
 from src.domain.entities.zone_transition import ZoneTransition
 from src.domain.exceptions import (
@@ -21,10 +25,15 @@ from src.domain.value_objects.envelope import Envelope
 
 ZONE_TRANSITION_SCHEMA = "ods.s1.zone_transition"
 ZONE_OCCUPANCY_SCHEMA = "ods.s1.zone_occupancy"
+POSITION_SCHEMA = "ods.s1.position"
 QUALIFIED_EVENT_SCHEMA = "ods.s2.event"
+SESSION_STARTED_SCHEMA = "ods.session.started"
+REPLAY_STATE_SCHEMA = "ods.p6.replay.state"
 SUPPORTED_MAJOR_VERSION = 1
 
-DomainMessage = ZoneTransition | ZoneOccupancySample | QualifiedEvent
+DomainMessage = (
+    ZoneTransition | ZoneOccupancySample | PositionSample | QualifiedEvent | SessionStart | ReplayState
+)
 
 
 @dataclass(frozen=True)
@@ -49,12 +58,18 @@ class IngestEnvelopeUseCase:
         self._payload_parsers: dict[str, Callable[[Envelope], DomainMessage]] = {
             ZONE_TRANSITION_SCHEMA: self._parse_zone_transition,
             ZONE_OCCUPANCY_SCHEMA: self._parse_zone_occupancy,
+            POSITION_SCHEMA: self._parse_position,
             QUALIFIED_EVENT_SCHEMA: self._parse_qualified_event,
+            SESSION_STARTED_SCHEMA: self._parse_session_started,
+            REPLAY_STATE_SCHEMA: self._parse_replay_state,
         }
         self._profile_fields = {
             ZONE_TRANSITION_SCHEMA: EV_SINAL_FIELDS,
             ZONE_OCCUPANCY_SCHEMA: EV_SINAL_FIELDS,
+            POSITION_SCHEMA: EV_SINAL_FIELDS,
             QUALIFIED_EVENT_SCHEMA: EV_SERVICO_FIELDS,
+            SESSION_STARTED_SCHEMA: EV_SINAL_SESSION_FIELDS,
+            REPLAY_STATE_SCHEMA: EV_SINAL_SESSION_FIELDS,
         }
 
     @property
@@ -117,6 +132,27 @@ class IngestEnvelopeUseCase:
         )
 
     @staticmethod
+    def _parse_position(envelope: Envelope) -> PositionSample:
+        payload = envelope.payload
+        return PositionSample(
+            source_id=envelope.source_id,
+            session_id=envelope.session_id,
+            observed_at=envelope.captured_at,
+            frame_index=payload["frame_index"],
+            positions=tuple(
+                TrackPosition(
+                    track_id=item["track_id"],
+                    object_class=item["class"],
+                    point_px=_pair(item["point_px"], "point_px"),
+                    zone_ids=tuple(item["zone_ids"]),
+                    position_m=_pair(item["position_m"], "position_m") if "position_m" in item else None,
+                    space_id=item.get("space_id"),
+                )
+                for item in payload["positions"]
+            ),
+        )
+
+    @staticmethod
     def _parse_qualified_event(envelope: Envelope) -> QualifiedEvent:
         payload = envelope.payload
         return QualifiedEvent(
@@ -131,3 +167,41 @@ class IngestEnvelopeUseCase:
             zone_id=payload.get("zone_id"),
             object_class=payload.get("class"),
         )
+
+    @staticmethod
+    def _parse_session_started(envelope: Envelope) -> SessionStart:
+        payload = envelope.payload
+        sources = payload["sources"]
+        if not isinstance(sources, list) or not all(isinstance(item, str) for item in sources):
+            raise TypeError("sources deve ser uma lista de strings.")
+        return SessionStart(
+            session_id=envelope.session_id,
+            mode=payload["mode"],
+            started_at=parse_utc_timestamp(payload["started_at"], "started_at"),
+            sources=tuple(sources),
+            recording_id=payload.get("recording_id"),
+            previous_session_id=payload.get("previous_session_id"),
+            reason=payload.get("reason"),
+        )
+
+    @staticmethod
+    def _parse_replay_state(envelope: Envelope) -> ReplayState:
+        payload = envelope.payload
+        return ReplayState(
+            session_id=envelope.session_id,
+            captured_at=envelope.captured_at,
+            recording_id=payload["recording_id"],
+            state=payload["state"],
+            position_ms=payload["position_ms"],
+            duration_ms=payload["duration_ms"],
+            speed_factor=payload["speed_factor"],
+            loop=payload["loop"],
+        )
+
+
+def _pair(value: object, field_name: str) -> tuple[float, float]:
+    if not isinstance(value, list) or len(value) != 2 or not all(
+        isinstance(v, (int, float)) and not isinstance(v, bool) for v in value
+    ):
+        raise TypeError(f"{field_name} deve ser [x, y] numérico.")
+    return (float(value[0]), float(value[1]))

@@ -6,14 +6,6 @@ class DomainError(ODSBaseException):
     """Erros de violação de regras de negócio do domínio."""
 
 
-class InvalidWorldCoordinateError(DomainError):
-    """Lançado quando uma coordenada de mundo recebe valores não finitos (NaN/inf)."""
-
-
-class InvalidSpatialCellError(DomainError):
-    """Lançado quando uma célula recebe densidade negativa ou não finita."""
-
-
 class InvalidTimeWindowError(DomainError):
     """Lançado quando start_time é maior ou igual a end_time."""
 
@@ -42,24 +34,22 @@ class InvalidEventMetricError(DomainError):
     incoerentes."""
 
 
+class InvalidSessionError(DomainError):
+    """Lançado quando um início de sessão (ods.session.started) ou um estado de replay
+    (ods.p6.replay.state) tem modo, estado ou valores fora do contrato."""
+
+
+class InvalidPositionError(DomainError):
+    """Lançado quando uma posição de S1 tem ids vazios, coordenadas não finitas ou
+    position_m sem space_id."""
+
+
 class InvalidGranularityError(DomainError):
     """Lançado quando a granularidade não é uma de 1m, 15m, 1h e 1d."""
 
 
 class InvalidOccupancyMetricError(DomainError):
     """Lançado quando uma métrica de ocupação recebe zone_id vazio ou valores negativos."""
-
-
-class InvalidPixelCoordinateError(DomainError):
-    """Lançado quando uma coordenada de pixel recebe valores não finitos (NaN/inf)."""
-
-
-class InvalidHomographyMatrixError(DomainError):
-    """Lançado quando a matriz de homografia não é 3x3 ou contém valores não finitos."""
-
-
-class InvalidHeatmapGridError(DomainError):
-    """Lançado quando uma grade de mapa de calor recebe grid_id vazio."""
 
 
 class ApplicationError(ODSBaseException):
@@ -73,6 +63,25 @@ class MalformedEventEnvelopeError(ApplicationError):
 
 class UnsupportedSchemaError(ApplicationError):
     """Lançado quando chega uma mensagem de um schema que o S5 não consome."""
+
+
+class ContractViolationError(ApplicationError):
+    """Lançado quando uma mensagem não segue o JSON Schema do seu contrato, ou quando não
+    há contrato para o schema que ela declara."""
+
+    def __init__(self, schema: str | None, problems: list[str]) -> None:
+        super().__init__(f"{schema}: {'; '.join(problems)}")
+        self.schema = schema
+        self.problems = problems
+
+
+class QueryRejectedError(ApplicationError):
+    """Lançado quando uma consulta é recusada; code vai no error da reply (regra 6)."""
+
+    def __init__(self, code: str, message: str) -> None:
+        super().__init__(message)
+        self.code = code
+        self.message = message
 
 
 class UnsupportedSchemaVersionError(ApplicationError):

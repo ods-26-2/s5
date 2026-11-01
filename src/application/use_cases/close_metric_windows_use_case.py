@@ -1,13 +1,11 @@
+import logging
 from datetime import datetime, timedelta
 
-from src.application.messaging.outgoing_envelope_factory import (
-    OutgoingEnvelopeFactory,
-    format_utc,
-)
+from src.application.messaging.metric_payloads import event_metrics_payload, zone_metrics_payload
+from src.application.messaging.outgoing_envelope_factory import OutgoingEnvelopeFactory
 from src.application.ports.event_publisher import IEventPublisher
 from src.application.state.metrics_buffer import MetricsBuffer
-from src.domain.entities.event_metric import EventMetric
-from src.domain.entities.occupancy_metric import OccupancyMetric
+from src.domain.entities.session_start import REPLAY
 from src.domain.repositories.i_time_series_repository import ITimeSeriesRepository
 from src.domain.services.aggregation_strategy import AggregationStrategy
 from src.domain.services.event_metrics_aggregation import EventMetricsAggregation
@@ -18,6 +16,9 @@ ZONE_METRICS_SCHEMA = "ods.s5.zone_metrics"
 EVENT_METRICS_SCHEMA = "ods.s5.event_metrics"
 DEFAULT_GRANULARITIES = ("1m", "15m", "1h", "1d")
 DEFAULT_GRACE_SECONDS = 2.0
+DEFAULT_MAX_CATCHUP_SECONDS = 3600.0
+
+logger = logging.getLogger(__name__)
 
 
 class CloseMetricWindowsUseCase:
@@ -25,9 +26,17 @@ class CloseMetricWindowsUseCase:
     disparo anterior, persiste as métricas e publica ods.s5.zone_metrics (uma por zona
     conhecida) e ods.s5.event_metrics (uma por tipo de evento com ocorrência).
 
-    Uma janela só fecha `grace_seconds` depois do seu fim, para acolher a latência entre
-    captura e publicação das mensagens de S1 e S2. O primeiro disparo só marca o ponto de
-    partida: as janelas anteriores a ele não teriam dados completos.
+    O relógio depende do modo da sessão corrente: em LIVE é o relógio de parede (`now`);
+    em REPLAY é o watermark de captura da gravação, porque o tempo de captura reproduzido
+    não acompanha a parede e pode até voltar (SEEK, LOOP). Uma janela só fecha
+    `grace_seconds` depois do seu fim, para acolher a latência entre captura e publicação.
+
+    A cada nova sessão o cursor volta ao início dela: as janelas ainda abertas da sessão
+    anterior são abandonadas, como o resto do estado daquela sessão.
+
+    Em LIVE, a recuperação de janelas atrasadas é limitada a `max_catchup_seconds`. Depois
+    de uma parada longa, fechar tudo publicaria milhares de janelas de uma vez em um
+    broker pago e compartilhado; as janelas mais antigas que o limite são abandonadas.
     """
 
     def __init__(
@@ -40,6 +49,7 @@ class CloseMetricWindowsUseCase:
         envelope_factory: OutgoingEnvelopeFactory,
         granularities: tuple[str, ...] = DEFAULT_GRANULARITIES,
         grace_seconds: float = DEFAULT_GRACE_SECONDS,
+        max_catchup_seconds: float = DEFAULT_MAX_CATCHUP_SECONDS,
     ) -> None:
         self._buffer = buffer
         self._zone_aggregation = zone_aggregation
@@ -49,41 +59,64 @@ class CloseMetricWindowsUseCase:
         self._envelope_factory = envelope_factory
         self._granularities = granularities
         self._grace = timedelta(seconds=grace_seconds)
+        self._max_catchup = timedelta(seconds=max_catchup_seconds)
+        self._cursor_session_id: str | None = None
         self._closed_until: datetime | None = None
 
     def execute(self, now: datetime) -> list[dict]:
-        until = now - self._grace
-        if self._closed_until is None:
-            self._closed_until = until
+        session = self._buffer.session
+        if session is None:
             return []
-        session_id = self._buffer.current_session_id
-        if session_id is None or until <= self._closed_until:
+        if session.session_id != self._cursor_session_id:
+            self._cursor_session_id = session.session_id
+            self._closed_until = session.started_at
+
+        clock = session.watermark if session.mode == REPLAY else now
+        until = clock - self._grace
+        if session.mode != REPLAY and until - self._closed_until > self._max_catchup:
+            logger.warning(
+                "Janelas de %s a %s abandonadas: atraso maior que o limite de recuperação.",
+                self._closed_until,
+                until - self._max_catchup,
+            )
+            self._closed_until = until - self._max_catchup
+        if until <= self._closed_until:
             return []
 
         published = []
         for granularity in self._granularities:
             for window in closed_windows(granularity, self._closed_until, until):
-                published += self._close_zone_window(granularity, window, session_id)
-                published += self._close_event_window(granularity, window, session_id)
+                published += self._close_zone_window(granularity, window, session.session_id, session.mode)
+                published += self._close_event_window(granularity, window, session.session_id, session.mode)
 
+        self._persist_presence(session.session_id, until)
         self._closed_until = until
         longest = max(GRANULARITY_SECONDS[g] for g in self._granularities)
         self._buffer.prune(before=until - timedelta(seconds=longest))
         return published
 
+    def _persist_presence(self, session_id: str, until: datetime) -> None:
+        drained = self._buffer.presence.drain(session_id, until)
+        if drained:
+            self._repository.save_presence(
+                [(key, seconds, self._buffer.mode_of(key.session_id)) for key, seconds in drained.items()]
+            )
+
     def _close_zone_window(
-        self, granularity: str, window: TimeWindow, session_id: str
+        self, granularity: str, window: TimeWindow, session_id: str, mode: str
     ) -> list[dict]:
         messages = []
         for zone_id, context in sorted(self._buffer.zones.items()):
             metric = self._zone_aggregation.aggregate(
                 self._buffer.transitions, self._buffer.samples, zone_id, window
             )
-            self._repository.save_occupancy_metric(metric, granularity)
+            self._repository.save_occupancy_metric(
+                metric, granularity, mode=mode, session_id=session_id
+            )
             messages.append(
                 self._publish(
                     ZONE_METRICS_SCHEMA,
-                    _zone_metrics_payload(metric, granularity),
+                    zone_metrics_payload(metric, granularity),
                     window.end_time,
                     session_id,
                     source_id=context.source_id,
@@ -93,15 +126,17 @@ class CloseMetricWindowsUseCase:
         return messages
 
     def _close_event_window(
-        self, granularity: str, window: TimeWindow, session_id: str
+        self, granularity: str, window: TimeWindow, session_id: str, mode: str
     ) -> list[dict]:
         messages = []
         for metric in self._event_aggregation.aggregate(self._buffer.events, window):
-            self._repository.save_event_metric(metric, granularity)
+            self._repository.save_event_metric(
+                metric, granularity, mode=mode, session_id=session_id
+            )
             messages.append(
                 self._publish(
                     EVENT_METRICS_SCHEMA,
-                    _event_metrics_payload(metric, granularity),
+                    event_metrics_payload(metric, granularity),
                     window.end_time,
                     session_id,
                     artifact_version=self._buffer.rules_versions.get(metric.event_type),
@@ -118,35 +153,3 @@ class CloseMetricWindowsUseCase:
         self._publisher.publish(schema, message)
         return message
 
-
-def _window_fields(window: TimeWindow, granularity: str) -> dict:
-    return {
-        "window_start_at": format_utc(window.start_time),
-        "window_end_at": format_utc(window.end_time),
-        "granularity": granularity,
-    }
-
-
-def _zone_metrics_payload(metric: OccupancyMetric, granularity: str) -> dict:
-    return {
-        "zone_id": metric.zone_id,
-        **_window_fields(metric.window, granularity),
-        "total_count": metric.total_count,
-        "occupancy_peak": metric.occupancy_peak,
-        "occupancy_avg": round(metric.occupancy_avg, 4),
-        "dwell_avg_s": round(metric.dwell_time_avg),
-    }
-
-
-def _event_metrics_payload(metric: EventMetric, granularity: str) -> dict:
-    payload = {"event_type": metric.event_type}
-    if metric.zone_id is not None:
-        payload["zone_id"] = metric.zone_id
-    if metric.object_class is not None:
-        payload["class"] = metric.object_class
-    payload.update(_window_fields(metric.window, granularity))
-    payload["count"] = metric.count
-    payload["uncertain_count"] = metric.uncertain_count
-    if metric.duration_avg_ms is not None:
-        payload["duration_avg_ms"] = metric.duration_avg_ms
-    return payload

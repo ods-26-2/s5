@@ -1,13 +1,12 @@
+import threading
 from datetime import datetime, timedelta
 
 import duckdb
 
 from src.domain.entities.event_metric import EventMetric
-from src.domain.entities.heatmap_grid import HeatmapGrid
 from src.domain.entities.occupancy_metric import OccupancyMetric
-from src.domain.value_objects.spatial_cell import SpatialCell
+from src.domain.services.presence_accumulator import PresenceKey
 from src.domain.value_objects.time_window import TimeWindow
-from src.domain.value_objects.world_coordinate import WorldCoordinate
 from src.infrastructure.database.duckdb_time_series_repository import DuckDBTimeSeriesRepository
 
 
@@ -21,9 +20,8 @@ def test_deve_persistir_e_consultar_metrica_de_ocupacao_no_duckdb():
     )
 
     repository.save_occupancy_metric(metric, granularity="1m")
-    result = repository.query_metrics(
-        "zone-01", TimeWindow(start_time=base_time, end_time=base_time + timedelta(hours=1)), "1m"
-    )
+    hour = TimeWindow(start_time=base_time, end_time=base_time + timedelta(hours=1))
+    result = repository.query_zone_series(hour, "1m", zone_id="zone-01")
 
     assert len(result) == 1
     assert result[0].zone_id == "zone-01"
@@ -31,29 +29,12 @@ def test_deve_persistir_e_consultar_metrica_de_ocupacao_no_duckdb():
     assert result[0].occupancy_avg == 2.5
 
 
-def test_deve_persistir_e_consultar_celulas_de_heatmap_no_duckdb():
-    repository = DuckDBTimeSeriesRepository(":memory:")
-    timestamp = datetime(2026, 9, 10, 10, 0, 0)
-    grid = HeatmapGrid(
-        grid_id="grid-01",
-        cells=(SpatialCell(position=WorldCoordinate(x=1.0, y=2.0), density=0.8),),
-    )
-
-    repository.save_heatmap_grid(grid, timestamp)
-    result = repository.query_heatmap(
-        "grid-01", TimeWindow(start_time=timestamp - timedelta(seconds=1), end_time=timestamp + timedelta(seconds=1))
-    )
-
-    assert len(result) == 1
-    assert result[0].cells[0].density == 0.8
-
-
 def test_deve_retornar_lista_vazia_quando_nao_houver_metricas_na_janela():
     repository = DuckDBTimeSeriesRepository(":memory:")
     base_time = datetime(2026, 9, 10, 10, 0, 0)
     window = TimeWindow(start_time=base_time, end_time=base_time + timedelta(minutes=1))
 
-    result = repository.query_metrics("zone-01", window, "1m")
+    result = repository.query_zone_series(window, "1m", zone_id="zone-01")
 
     assert result == []
 
@@ -73,9 +54,8 @@ def test_deve_acrescentar_occupancy_avg_em_banco_criado_antes_da_coluna(tmp_path
     legacy.close()
 
     repository = DuckDBTimeSeriesRepository(database_path)
-    result = repository.query_metrics(
-        "zone-01", TimeWindow(start_time=base_time, end_time=base_time + timedelta(hours=1)), "1m"
-    )
+    hour = TimeWindow(start_time=base_time, end_time=base_time + timedelta(hours=1))
+    result = repository.query_zone_series(hour, "1m", zone_id="zone-01")
 
     assert result[0].total_count == 2
     assert result[0].occupancy_avg == 0.0
@@ -93,10 +73,186 @@ def test_deve_persistir_e_consultar_metrica_por_tipo_de_evento_no_duckdb():
         granularity="1h",
     )
 
-    result = repository.query_event_metrics("PPE_NON_COMPLIANT", window, "1h")
+    result = repository.query_event_series(window, "1h", event_type="PPE_NON_COMPLIANT")
 
     assert len(result) == 1
     assert result[0].count == 4
     assert result[0].uncertain_count == 1
     assert result[0].zone_id == "galpao-solda"
     assert result[0].duration_avg_ms == 12400
+
+
+def test_consulta_padrao_le_so_live_para_que_replay_nao_duplique_o_historico():
+    repository = DuckDBTimeSeriesRepository(":memory:")
+    base_time = datetime(2026, 9, 23, 14, 0, 0)
+    window = TimeWindow(start_time=base_time, end_time=base_time + timedelta(minutes=1))
+    live = OccupancyMetric(zone_id="vaga-12", window=window, dwell_time_avg=1.0, occupancy_peak=1, total_count=1)
+    replay = OccupancyMetric(zone_id="vaga-12", window=window, dwell_time_avg=2.0, occupancy_peak=1, total_count=5)
+    repository.save_occupancy_metric(live, "1m", mode="LIVE", session_id="s-live")
+    repository.save_occupancy_metric(replay, "1m", mode="REPLAY", session_id="s-replay")
+    period = TimeWindow(start_time=base_time, end_time=base_time + timedelta(hours=1))
+
+    assert [m.total_count for m in repository.query_zone_series(period, "1m", zone_id="vaga-12")] == [1]
+    assert [m.total_count for m in repository.query_zone_series(period, "1m", zone_id="vaga-12", mode="REPLAY")] == [5]
+
+
+def test_metricas_de_evento_em_replay_ficam_fora_da_consulta_padrao():
+    repository = DuckDBTimeSeriesRepository(":memory:")
+    base_time = datetime(2026, 9, 23, 14, 0, 0)
+    window = TimeWindow(start_time=base_time, end_time=base_time + timedelta(hours=1))
+    metric = EventMetric(event_type="PPE_NON_COMPLIANT", window=window, count=1, uncertain_count=0)
+    repository.save_event_metric(metric, "1h", mode="REPLAY", session_id="s-replay")
+
+    assert repository.query_event_series(window, "1h", event_type="PPE_NON_COMPLIANT") == []
+    assert len(repository.query_event_series(window, "1h", event_type="PPE_NON_COMPLIANT", mode="REPLAY")) == 1
+
+
+def test_deve_acrescentar_mode_e_session_id_em_event_metrics_criada_sem_elas(tmp_path):
+    database_path = str(tmp_path / "passo3.db")
+    legacy = duckdb.connect(database_path)
+    legacy.execute(
+        "CREATE TABLE event_metrics (event_type VARCHAR, zone_id VARCHAR, object_class VARCHAR,"
+        " granularity VARCHAR, start_time TIMESTAMP, end_time TIMESTAMP, count INTEGER,"
+        " uncertain_count INTEGER, duration_avg_ms INTEGER)"
+    )
+    base_time = datetime(2026, 9, 23, 14, 0, 0)
+    legacy.execute(
+        "INSERT INTO event_metrics VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        ["X", None, None, "1h", base_time, base_time + timedelta(hours=1), 2, 0, None],
+    )
+    legacy.close()
+
+    repository = DuckDBTimeSeriesRepository(database_path)
+    window = TimeWindow(start_time=base_time, end_time=base_time + timedelta(hours=1))
+
+    assert [m.count for m in repository.query_event_series(window, "1h", event_type="X")] == [2]
+
+
+def test_deve_somar_presenca_por_celula_fina_no_periodo_filtrando_classe_e_modo():
+    repository = DuckDBTimeSeriesRepository(":memory:")
+    bucket = datetime(2026, 9, 23, 14, 10)
+
+    def key(object_class="person", minute=0, session="s-1"):
+        return PresenceKey(session, "METERS", "patio-1", object_class, 34, 71, bucket + timedelta(minutes=minute))
+
+    repository.save_presence([
+        (key(), 2.0, "LIVE"),
+        (key(minute=1), 3.5, "LIVE"),
+        (key(object_class="vehicle"), 9.0, "LIVE"),
+        (key(session="s-replay"), 7.0, "REPLAY"),
+        (key(minute=60), 1.0, "LIVE"),
+    ])
+    hour = TimeWindow(start_time=datetime(2026, 9, 23, 14), end_time=datetime(2026, 9, 23, 15))
+
+    assert repository.query_presence("METERS", "patio-1", hour, object_class="person") == [(34, 71, 5.5)]
+    assert repository.query_presence("METERS", "patio-1", hour) == [(34, 71, 14.5)]
+    assert repository.query_presence("METERS", "patio-1", hour, mode="REPLAY") == [(34, 71, 7.0)]
+
+
+def test_deve_consultar_series_com_filtros_opcionais():
+    repository = DuckDBTimeSeriesRepository(":memory:")
+    base_time = datetime(2026, 9, 23, 14, 0, 0)
+    window = TimeWindow(start_time=base_time, end_time=base_time + timedelta(hours=1))
+    for zone_id in ("vaga-12", "vaga-13"):
+        repository.save_occupancy_metric(
+            OccupancyMetric(zone_id=zone_id, window=window, dwell_time_avg=1.0, occupancy_peak=1, total_count=1), "1h"
+        )
+    repository.save_event_metric(EventMetric(event_type="A", window=window, count=1, uncertain_count=0, zone_id="z"), "1h")
+    repository.save_event_metric(EventMetric(event_type="B", window=window, count=2, uncertain_count=0), "1h")
+    day = TimeWindow(start_time=base_time, end_time=base_time + timedelta(days=1))
+
+    assert [m.zone_id for m in repository.query_zone_series(day, "1h")] == ["vaga-12", "vaga-13"]
+    assert [m.zone_id for m in repository.query_zone_series(day, "1h", zone_id="vaga-13")] == ["vaga-13"]
+    assert [m.event_type for m in repository.query_event_series(day, "1h")] == ["A", "B"]
+    assert [m.count for m in repository.query_event_series(day, "1h", zone_id="z")] == [1]
+    assert repository.zone_exists("vaga-12") and not repository.zone_exists("vaga-99")
+
+
+def test_expurgo_live_usa_o_fim_da_janela_e_o_de_replay_usa_quando_foi_gravado():
+    stored = [datetime(2026, 10, 21, 12)]
+    repository = DuckDBTimeSeriesRepository(":memory:", clock=lambda: stored[0])
+    old = TimeWindow(start_time=datetime(2026, 10, 1, 10), end_time=datetime(2026, 10, 1, 10, 1))
+    recent = TimeWindow(start_time=datetime(2026, 10, 21, 10), end_time=datetime(2026, 10, 21, 10, 1))
+
+    def metric(window):
+        return OccupancyMetric(zone_id="vaga-12", window=window, dwell_time_avg=1.0, occupancy_peak=1, total_count=1)
+
+    repository.save_occupancy_metric(metric(old), "1m")
+    repository.save_occupancy_metric(metric(recent), "1m")
+    repository.save_event_metric(EventMetric(event_type="A", window=old, count=1, uncertain_count=0), "1m")
+    # Replay de uma gravação antiga, gravado hoje: não pode expirar pelo tempo de captura.
+    repository.save_occupancy_metric(metric(old), "1m", mode="REPLAY", session_id="r-1")
+
+    removed = repository.delete_live_metrics_before("1m", datetime(2026, 10, 14, 12))
+
+    assert removed == 2
+    period = TimeWindow(start_time=datetime(2026, 9, 1), end_time=datetime(2026, 11, 1))
+    assert [m.window for m in repository.query_zone_series(period, "1m")] == [recent]
+    assert len(repository.query_zone_series(period, "1m", mode="REPLAY")) == 1
+
+    assert repository.delete_replay_stored_before(datetime(2026, 10, 21, 11)) == 0
+    assert repository.delete_replay_stored_before(datetime(2026, 10, 21, 13)) == 1
+
+
+def test_expurgo_de_presenca_apaga_so_minutos_ja_encerrados_antes_do_corte():
+    repository = DuckDBTimeSeriesRepository(":memory:")
+
+    def key(minute):
+        return PresenceKey("s-1", "METERS", "patio-1", "person", 1, 1, datetime(2026, 10, 7, 12, minute))
+
+    repository.save_presence([(key(0), 1.0, "LIVE"), (key(1), 1.0, "LIVE")])
+
+    # O minuto 12:00 termina às 12:01, então só ele expira com corte em 12:01:30.
+    assert repository.delete_live_presence_before(datetime(2026, 10, 7, 12, 1, 30)) == 1
+
+
+def test_banco_sem_stored_at_recebe_a_coluna_com_o_instante_da_migracao(tmp_path):
+    database_path = str(tmp_path / "sem_stored_at.db")
+    legacy = duckdb.connect(database_path)
+    legacy.execute(
+        "CREATE TABLE presence_cells (mode VARCHAR, session_id VARCHAR, space_kind VARCHAR, space_key VARCHAR,"
+        " object_class VARCHAR, cell_x INTEGER, cell_y INTEGER, bucket_start TIMESTAMP, seconds DOUBLE)"
+    )
+    legacy.execute(
+        "INSERT INTO presence_cells VALUES ('REPLAY', 'r', 'METERS', 'p', 'person', 1, 1, ?, 2.0)",
+        [datetime(2026, 10, 1)],
+    )
+    legacy.close()
+
+    repository = DuckDBTimeSeriesRepository(database_path, clock=lambda: datetime(2026, 10, 21, 12))
+    hour = TimeWindow(start_time=datetime(2026, 10, 1), end_time=datetime(2026, 10, 1, 1))
+
+    assert repository.delete_replay_stored_before(datetime(2026, 10, 21, 11)) == 0
+    assert repository.query_presence("METERS", "p", hour, mode="REPLAY") == [(1, 1, 2.0)]
+    assert repository.delete_replay_stored_before(datetime(2026, 10, 21, 13)) == 1
+
+
+def test_varias_threads_podem_gravar_e_ler_no_mesmo_repositorio():
+    repository = DuckDBTimeSeriesRepository(":memory:")
+    base_time = datetime(2026, 9, 23, 14, 0, 0)
+    failures = []
+
+    def work(zone: int) -> None:
+        try:
+            for minute in range(50):
+                window = TimeWindow(
+                    start_time=base_time + timedelta(minutes=minute),
+                    end_time=base_time + timedelta(minutes=minute + 1),
+                )
+                repository.save_occupancy_metric(
+                    OccupancyMetric(zone_id=f"z-{zone}", window=window, dwell_time_avg=1.0, occupancy_peak=1, total_count=1),
+                    "1m",
+                )
+                repository.query_zone_series(window, "1m", zone_id=f"z-{zone}")
+        except Exception as error:  # a falha precisa chegar à thread do teste
+            failures.append(error)
+
+    threads = [threading.Thread(target=work, args=(zone,)) for zone in range(4)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    day = TimeWindow(start_time=base_time, end_time=base_time + timedelta(days=1))
+    assert failures == []
+    assert len(repository.query_zone_series(day, "1m")) == 200

@@ -1,0 +1,31 @@
+{
+  "message_type": "reply",
+  "message_id": "d4e5f607-1829-4d0e-9f1a-3b4c5d6e7f80",
+  "schema": "ods.s5.heatmap.reply",
+  "schema_version": "1.0",
+  "producer": "S5",
+  "published_at": "2026-09-23T15:00:00.150Z",
+  "correlation_id": "8293a4b5-c6d7-4142-9d5e-7f8091a2b3c4",
+  "payload": {
+    "status": "OK",
+    "grid_width": 3,
+    "grid_height": 2,
+    "cell_size_m": 0.5,
+    "origin": [
+      3.0,
+      7.0
+    ],
+    "cells": [
+      [
+        42,
+        -1,
+        0
+      ],
+      [
+        0,
+        0,
+        7
+      ]
+    ]
+  }
+}

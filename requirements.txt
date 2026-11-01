@@ -1,5 +1,8 @@
-pytest
-duckdb
-fastapi
-uvicorn
-httpx
+# Versões fixadas para que a build seja reproduzível (arquitetura 6c, P1/P3).
+# Ao atualizar uma versão, rode a suíte completa antes de mudar este arquivo.
+# Para rodar os testes, instale requirements-dev.txt.
+confluent-kafka==2.6.1
+duckdb==1.5.6
+fastapi==0.143.0
+jsonschema==4.23.0
+uvicorn==0.54.0

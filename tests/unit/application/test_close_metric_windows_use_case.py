@@ -8,7 +8,18 @@ from src.application.ports.event_publisher import IEventPublisher
 from src.domain.services.aggregation_strategy import ZoneOccupancyAggregationStrategy
 from src.domain.services.event_metrics_aggregation import EventMetricsAggregation
 from src.domain.services.message_deduplicator import MessageDeduplicator
-from tests.fixtures.spec_examples import SESSION_ID, qualified_event, zone_occupancy, zone_transition_exit
+from src.domain.entities.session_start import REPLAY
+from tests.fixtures.spec_examples import (
+    position,
+    REPLAY_SESSION_ID,
+    SESSION_ID,
+    in_session,
+    qualified_event,
+    replay_session_started,
+    replay_state,
+    zone_occupancy,
+    zone_transition_exit,
+)
 
 from .fakes import FakeTimeSeriesRepository
 
@@ -125,3 +136,93 @@ def test_nao_deve_publicar_sem_nenhuma_mensagem_recebida():
     use_case.execute(datetime(2026, 9, 23, 14, 0))
 
     assert use_case.execute(datetime(2026, 9, 23, 15, 0)) == []
+
+WALL_CLOCK = datetime(2026, 10, 16, 13, 0, 0)
+
+
+def _replay_setup():
+    ingest = IngestEnvelopeUseCase(MessageDeduplicator())
+    buffer = MetricsBuffer()
+    buffer.add(ingest.execute(replay_session_started()))
+    buffer.add(ingest.execute(in_session(zone_transition_exit(), REPLAY_SESSION_ID, "m-exit")))
+    repository = FakeTimeSeriesRepository()
+    publisher = RecordingPublisher()
+    use_case = CloseMetricWindowsUseCase(
+        buffer, ZoneOccupancyAggregationStrategy(), EventMetricsAggregation(),
+        repository, publisher, OutgoingEnvelopeFactory(), granularities=("1m",),
+    )
+    return use_case, ingest, buffer, repository, publisher
+
+
+def _heartbeat(ingest, buffer, captured_at: str, message_id: str):
+    buffer.add(ingest.execute(in_session(replay_state(), REPLAY_SESSION_ID, message_id, captured_at)))
+
+
+def test_em_replay_o_relogio_e_o_watermark_da_gravacao_e_nao_a_parede():
+    use_case, ingest, buffer, repository, publisher = _replay_setup()
+    assert use_case.execute(WALL_CLOCK) == []
+
+    _heartbeat(ingest, buffer, "2026-09-23T14:30:02.500Z", "hb-1")
+    published = use_case.execute(WALL_CLOCK)
+
+    assert [m["payload"]["window_end_at"] for m in published] == ["2026-09-23T14:30:00.000Z"]
+    assert published[0]["session_id"] == REPLAY_SESSION_ID
+    assert repository.saved_modes == [(REPLAY, REPLAY_SESSION_ID)]
+
+
+def test_replay_pausado_nao_fecha_janelas_mesmo_com_a_parede_andando():
+    use_case, ingest, buffer, _, _ = _replay_setup()
+    _heartbeat(ingest, buffer, "2026-09-23T14:29:59.000Z", "hb-1")
+
+    assert use_case.execute(WALL_CLOCK + timedelta(hours=1)) == []
+
+
+def test_nova_sessao_volta_o_cursor_ao_inicio_dela_e_abandona_janelas_abertas():
+    use_case, ingest, buffer, _, publisher = _replay_setup()
+    _heartbeat(ingest, buffer, "2026-09-23T14:30:02.500Z", "hb-1")
+    use_case.execute(WALL_CLOCK)
+
+    loop = replay_session_started()
+    loop.update(message_id="m-loop", session_id="loop-2", captured_at="2026-09-23T14:20:00.000Z")
+    loop["payload"].update(started_at="2026-09-23T14:20:00.000Z", reason="LOOP", previous_session_id=REPLAY_SESSION_ID)
+    buffer.add(ingest.execute(loop))
+    buffer.add(ingest.execute(in_session(replay_state(), "loop-2", "hb-2", "2026-09-23T14:21:02.500Z")))
+    published = use_case.execute(WALL_CLOCK)
+
+    assert [m["payload"]["window_end_at"] for m in published] == ["2026-09-23T14:21:00.000Z"]
+    assert published[0]["session_id"] == "loop-2"
+    assert published[0]["sequence"] == 0
+    assert published[0]["payload"]["dwell_avg_s"] == 0
+
+
+def test_deve_gravar_presenca_dos_minutos_fechados_com_o_modo_da_sessao():
+    use_case, ingest, buffer, repository, _ = _replay_setup()
+    for message_id, captured_at in (("p-1", "2026-09-23T14:29:59.000Z"), ("p-2", "2026-09-23T14:29:59.500Z")):
+        buffer.add(ingest.execute(in_session(position(), REPLAY_SESSION_ID, message_id, captured_at)))
+    _heartbeat(ingest, buffer, "2026-09-23T14:30:02.500Z", "hb-1")
+
+    use_case.execute(WALL_CLOCK)
+
+    [(key, seconds, mode)] = repository.saved_presence
+    assert (key.space_key, key.cell_x, key.cell_y, mode) == ("patio-1", 34, 71, REPLAY)
+    assert seconds == 0.5
+
+
+def test_em_live_a_recuperacao_de_janelas_atrasadas_e_limitada():
+    use_case, _, publisher = _setup()
+
+    use_case.execute(datetime(2026, 9, 25, 10, 0, 2))
+
+    ends = [p["window_end_at"] for p in _payloads(publisher, "ods.s5.zone_metrics")]
+    assert len(ends) == 60
+    assert ends[0] == "2026-09-25T09:01:00.000Z"
+    assert ends[-1] == "2026-09-25T10:00:00.000Z"
+
+
+def test_em_replay_nao_ha_limite_de_recuperacao():
+    use_case, ingest, buffer, _, publisher = _replay_setup()
+    _heartbeat(ingest, buffer, "2026-09-23T16:30:02.500Z", "hb-1")
+
+    use_case.execute(WALL_CLOCK)
+
+    assert len(_payloads(publisher, "ods.s5.zone_metrics")) == 121

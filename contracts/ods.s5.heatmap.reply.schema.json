@@ -1,0 +1,47 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:ods:s5:ods.s5.heatmap.reply",
+  "title": "ods.s5.heatmap.reply",
+  "description": "Reply do S5 a ods.s5.heatmap.query. Perfil RPL. cells[y][x] são segundos de presença, inteiros; origin é o canto da primeira célula, na unidade da célula pedida. A grade cobre só o retângulo com presença e é vazia (0×0) sem presença no período. GRID_TOO_LARGE ainda não está na Especificação 1.0: foi proposto ao TRA-1 para a 1.1.",
+  "allOf": [{ "$ref": "urn:ods:s5:defs#/$defs/rpl" }],
+  "properties": {
+    "schema": { "const": "ods.s5.heatmap.reply" },
+    "producer": { "const": "S5" },
+    "payload": {
+      "oneOf": [
+        {
+          "type": "object",
+          "required": ["status", "grid_width", "grid_height", "origin", "cells"],
+          "properties": {
+            "status": { "const": "OK" },
+            "grid_width": { "type": "integer", "minimum": 0, "maximum": 200 },
+            "grid_height": { "type": "integer", "minimum": 0, "maximum": 200 },
+            "cell_size_m": { "type": "number", "exclusiveMinimum": 0 },
+            "cell_size_px": { "type": "number", "exclusiveMinimum": 0 },
+            "origin": { "type": "array", "items": { "type": "number" }, "minItems": 2, "maxItems": 2 },
+            "cells": {
+              "type": "array",
+              "maxItems": 200,
+              "items": { "type": "array", "maxItems": 200, "items": { "type": "integer", "minimum": 0 } }
+            }
+          },
+          "additionalProperties": false,
+          "oneOf": [{ "required": ["cell_size_m"] }, { "required": ["cell_size_px"] }]
+        },
+        {
+          "type": "object",
+          "required": ["status", "error"],
+          "properties": {
+            "status": { "const": "ERROR" },
+            "error": {
+              "allOf": [{ "$ref": "urn:ods:s5:defs#/$defs/error" }],
+              "properties": { "code": { "enum": ["INVALID_QUERY", "GRID_TOO_LARGE"] } }
+            }
+          },
+          "additionalProperties": false
+        }
+      ]
+    }
+  },
+  "unevaluatedProperties": false
+}

@@ -1,0 +1,139 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:ods:s5:defs",
+  "title": "Definições compartilhadas pelos contratos do S5",
+  "description": "Tipos, perfis de envelope (Especificação de interfaces 1.0, seção 3) e payloads de métricas reutilizados pelos schemas ods.s5.*. Os perfis de envelope são a leitura do MOD-2 da seção 3 até o B1 publicar o schema oficial do envelope.",
+  "$defs": {
+    "uuid": {
+      "description": "Identificador UUID em minúsculas. A especificação pede UUID v4; o padrão aceita qualquer versão para não recusar ids válidos de outros produtores.",
+      "type": "string",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+    },
+    "datetime": {
+      "description": "Marco de tempo ISO 8601 em UTC com milissegundos (seção 2, regra 2).",
+      "type": "string",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+    },
+    "nonEmptyString": { "type": "string", "minLength": 1 },
+    "granularity": { "enum": ["1m", "15m", "1h", "1d"] },
+    "count": { "type": "integer", "minimum": 0 },
+    "schemaVersion": {
+      "description": "MAJOR.MINOR; os contratos do S5 estão no MAJOR 1 (regra 8).",
+      "type": "string",
+      "pattern": "^1\\.\\d+$"
+    },
+
+    "evServico": {
+      "description": "Perfil EV-SERVIÇO: eventos derivados da camada 3.",
+      "type": "object",
+      "required": [
+        "message_type", "message_id", "schema", "schema_version", "producer",
+        "published_at", "captured_at", "session_id", "sequence", "payload"
+      ],
+      "properties": {
+        "message_type": { "const": "event" },
+        "message_id": { "$ref": "#/$defs/uuid" },
+        "schema": { "$ref": "#/$defs/nonEmptyString" },
+        "schema_version": { "$ref": "#/$defs/schemaVersion" },
+        "producer": { "$ref": "#/$defs/nonEmptyString" },
+        "published_at": { "$ref": "#/$defs/datetime" },
+        "captured_at": { "$ref": "#/$defs/datetime" },
+        "source_id": { "$ref": "#/$defs/nonEmptyString" },
+        "session_id": { "$ref": "#/$defs/uuid" },
+        "sequence": { "$ref": "#/$defs/count" },
+        "artifact_version": { "$ref": "#/$defs/nonEmptyString" },
+        "correlation_id": { "$ref": "#/$defs/uuid" },
+        "payload": { "type": "object" }
+      }
+    },
+    "cmd": {
+      "description": "Perfil CMD: comandos e consultas, com destinatário explícito e sem campos de sinal.",
+      "type": "object",
+      "required": [
+        "message_type", "message_id", "schema", "schema_version", "producer",
+        "published_at", "target", "payload"
+      ],
+      "properties": {
+        "message_type": { "enum": ["command", "query"] },
+        "message_id": { "$ref": "#/$defs/uuid" },
+        "schema": { "$ref": "#/$defs/nonEmptyString" },
+        "schema_version": { "$ref": "#/$defs/schemaVersion" },
+        "producer": { "$ref": "#/$defs/nonEmptyString" },
+        "published_at": { "$ref": "#/$defs/datetime" },
+        "target": { "$ref": "#/$defs/nonEmptyString" },
+        "correlation_id": { "$ref": "#/$defs/uuid" },
+        "payload": { "type": "object" }
+      }
+    },
+    "rpl": {
+      "description": "Perfil RPL: replies, ligadas ao pedido pelo correlation_id e sem campos de sinal.",
+      "type": "object",
+      "required": [
+        "message_type", "message_id", "schema", "schema_version", "producer",
+        "published_at", "correlation_id", "payload"
+      ],
+      "properties": {
+        "message_type": { "const": "reply" },
+        "message_id": { "$ref": "#/$defs/uuid" },
+        "schema": { "$ref": "#/$defs/nonEmptyString" },
+        "schema_version": { "$ref": "#/$defs/schemaVersion" },
+        "producer": { "$ref": "#/$defs/nonEmptyString" },
+        "published_at": { "$ref": "#/$defs/datetime" },
+        "correlation_id": { "$ref": "#/$defs/uuid" },
+        "payload": { "type": "object" }
+      }
+    },
+    "error": {
+      "description": "Erro de uma reply com status ERROR (seção 2, regra 6).",
+      "type": "object",
+      "required": ["code", "message"],
+      "properties": {
+        "code": { "type": "string", "pattern": "^[A-Z][A-Z0-9_]*$" },
+        "message": { "type": "string" }
+      },
+      "additionalProperties": false
+    },
+
+    "zoneMetricsPayload": {
+      "description": "Métricas de uma zona em uma janela fechada. É o payload de ods.s5.zone_metrics e o item das séries ZONE.",
+      "type": "object",
+      "required": [
+        "zone_id", "window_start_at", "window_end_at", "granularity",
+        "total_count", "occupancy_peak", "occupancy_avg", "dwell_avg_s"
+      ],
+      "properties": {
+        "zone_id": { "$ref": "#/$defs/nonEmptyString" },
+        "class": { "$ref": "#/$defs/nonEmptyString" },
+        "space_id": { "$ref": "#/$defs/nonEmptyString" },
+        "window_start_at": { "$ref": "#/$defs/datetime" },
+        "window_end_at": { "$ref": "#/$defs/datetime" },
+        "granularity": { "$ref": "#/$defs/granularity" },
+        "total_count": { "$ref": "#/$defs/count" },
+        "occupancy_peak": { "$ref": "#/$defs/count" },
+        "occupancy_avg": { "type": "number", "minimum": 0 },
+        "dwell_avg_s": { "$ref": "#/$defs/count" }
+      },
+      "additionalProperties": false
+    },
+    "eventMetricsPayload": {
+      "description": "Métricas de um tipo de evento em uma janela fechada. É o payload de ods.s5.event_metrics e o item das séries EVENT. uncertain_count não pode exceder count; essa regra é verificada pelo produtor, não pelo schema.",
+      "type": "object",
+      "required": [
+        "event_type", "window_start_at", "window_end_at", "granularity",
+        "count", "uncertain_count"
+      ],
+      "properties": {
+        "event_type": { "type": "string", "pattern": "^[A-Z][A-Z0-9_]*$" },
+        "zone_id": { "$ref": "#/$defs/nonEmptyString" },
+        "class": { "$ref": "#/$defs/nonEmptyString" },
+        "window_start_at": { "$ref": "#/$defs/datetime" },
+        "window_end_at": { "$ref": "#/$defs/datetime" },
+        "granularity": { "$ref": "#/$defs/granularity" },
+        "count": { "$ref": "#/$defs/count" },
+        "uncertain_count": { "$ref": "#/$defs/count" },
+        "duration_avg_ms": { "$ref": "#/$defs/count" }
+      },
+      "additionalProperties": false
+    }
+  }
+}
