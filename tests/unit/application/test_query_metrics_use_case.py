@@ -1,7 +1,11 @@
+import json
 from datetime import datetime, timedelta
+from pathlib import Path
 
 import pytest
 
+from src.application.parsers.artifact_parser import parse_zones
+from src.application.state.artifact_catalog import ArtifactCatalog
 from src.application.use_cases.query_metrics_use_case import QueryMetricsUseCase
 from src.domain.entities.event_metric import EventMetric
 from src.domain.entities.occupancy_metric import OccupancyMetric
@@ -11,7 +15,13 @@ from tests.fixtures.spec_examples import metrics_query
 
 from .fakes import FakeTimeSeriesRepository
 
+
 DAY = datetime(2026, 9, 22)
+import json
+from pathlib import Path
+
+from src.application.parsers.artifact_parser import parse_zones
+from src.application.state.artifact_catalog import ArtifactCatalog
 
 
 def _repository() -> FakeTimeSeriesRepository:
@@ -90,3 +100,17 @@ def test_deve_recusar_consulta_invalida(change):
     payload = metrics_query()["payload"]
     payload.update(change)
     assert _rejected_code(payload) == "INVALID_QUERY"
+
+
+def test_zona_do_artefato_sem_metricas_ainda_nao_e_desconhecida_e_serie_traz_space_id():
+    content = json.loads((Path(__file__).resolve().parents[2] / "fixtures/artifacts/zones-a8-2.json").read_text())
+    catalog = ArtifactCatalog()
+    catalog.put_zones(parse_zones(content, "zones-a8", "zones-a8-2"))
+    use_case = QueryMetricsUseCase(_repository(), catalog)
+
+    payload = metrics_query()["payload"]
+    payload["zone_id"] = "vaga-13"
+    assert use_case.execute(payload) == {"series": []}
+
+    series = use_case.execute(metrics_query()["payload"])["series"]
+    assert {item["space_id"] for item in series} == {"patio-1"}

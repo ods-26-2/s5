@@ -1,6 +1,11 @@
 from datetime import datetime
+from pathlib import Path
+
+import pytest
 
 from src.composition import build_s5
+from src.domain.exceptions import ArtifactUnavailableError
+from src.infrastructure.artifacts.file_artifact_source import read_descriptor_files
 from src.infrastructure.b3_bus.b3_event_consumer import InMemoryB3EventConsumer
 from src.infrastructure.database.duckdb_time_series_repository import DuckDBTimeSeriesRepository
 from tests.fixtures.spec_examples import (
@@ -82,3 +87,36 @@ def test_replies_de_erro_e_grade_vazia_tambem_seguem_o_contrato():
     bus.publish("ods.s5.heatmap.query", invalid)  # INVALID_QUERY
 
     assert [r["payload"]["status"] for r in replies] == ["ERROR", "OK", "ERROR"]
+
+
+def test_s5_carrega_os_artefatos_da_build_e_recebe_versoes_novas_pelo_barramento():
+    artifacts = Path(__file__).resolve().parents[1] / "fixtures" / "artifacts"
+    bus = InMemoryB3EventConsumer()
+    service = build_s5(
+        bus, bus, DuckDBTimeSeriesRepository(":memory:"),
+        initial_artifacts=read_descriptor_files([artifacts / "zones-a8-2.descriptor.json"]),
+        on_contract_violation=_fail,
+    )
+    bus.start()
+    assert service.catalog.versions() == {"zones-a8": "zones-a8-2"}
+
+    [descriptor] = read_descriptor_files([artifacts / "cal-cam0-3.descriptor.json"])
+    bus.publish("ods.artifact.published", {
+        "message_type": "event", "message_id": "a1b2c3d4-0000-4000-8000-0000000000aa",
+        "schema": "ods.artifact.published", "schema_version": "1.0", "producer": "I3",
+        "published_at": "2026-09-23T14:00:00.000Z", "payload": descriptor,
+    })
+
+    assert service.catalog.versions() == {"zones-a8": "zones-a8-2", "cal-cam0": "cal-cam0-3"}
+
+
+def test_s5_nao_sobe_se_um_artefato_da_build_nao_confere_com_o_hash(tmp_path):
+    source = Path(__file__).resolve().parents[1] / "fixtures" / "artifacts"
+    (tmp_path / "zones-a8-2.json").write_text("{}")
+    (tmp_path / "zones-a8-2.descriptor.json").write_text((source / "zones-a8-2.descriptor.json").read_text())
+
+    with pytest.raises(ArtifactUnavailableError):
+        build_s5(
+            InMemoryB3EventConsumer(), InMemoryB3EventConsumer(), DuckDBTimeSeriesRepository(":memory:"),
+            initial_artifacts=read_descriptor_files([tmp_path / "zones-a8-2.descriptor.json"]),
+        )

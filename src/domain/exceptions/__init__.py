@@ -44,6 +44,11 @@ class InvalidPositionError(DomainError):
     position_m sem space_id."""
 
 
+class InvalidArtifactError(DomainError):
+    """Lançado quando o conteúdo de um artefato (ZONES, CALIBRATION) viola o formato da
+    seção 8 da Especificação 1.0."""
+
+
 class InvalidGranularityError(DomainError):
     """Lançado quando a granularidade não é uma de 1m, 15m, 1h e 1d."""
 
@@ -82,6 +87,11 @@ class QueryRejectedError(ApplicationError):
         super().__init__(message)
         self.code = code
         self.message = message
+
+
+class ArtifactUnavailableError(ApplicationError):
+    """Lançado quando o conteúdo de um artefato não pode ser obtido pela URI do descritor,
+    ou não confere com o hash_sha256 dele."""
 
 
 class UnsupportedSchemaVersionError(ApplicationError):
