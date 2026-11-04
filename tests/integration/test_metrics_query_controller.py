@@ -1,8 +1,12 @@
+import json
 from datetime import datetime, timedelta
+from pathlib import Path
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from src.application.parsers.artifact_parser import parse_zones
+from src.application.state.artifact_catalog import ArtifactCatalog
 from src.domain.entities.occupancy_metric import OccupancyMetric
 from src.domain.services.presence_accumulator import METERS, PresenceKey
 from src.domain.value_objects.time_window import TimeWindow
@@ -76,3 +80,29 @@ def test_consulta_invalida_responde_400():
 
     assert response.status_code == 400
     assert response.json()["error"]["code"] == "INVALID_QUERY"
+
+
+def test_api_reconhece_as_zonas_do_artefato_do_servico():
+    artifacts = Path(__file__).resolve().parents[1] / "fixtures" / "artifacts"
+    catalog = ArtifactCatalog()
+    catalog.put_zones(parse_zones(json.loads((artifacts / "zones-a8-2.json").read_text()), "zones-a8", "zones-a8-2"))
+    app = FastAPI()
+    app.include_router(create_metrics_query_router(DuckDBTimeSeriesRepository(":memory:"), catalog))
+
+    response = TestClient(app).get(
+        "/api/v5/metrics", params={"metric": "ZONE", "zone_id": "vaga-13", "granularity": "15m", **PERIOD}
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {"status": "OK", "series": []}
+
+
+def test_api_devolve_o_perfil_de_pico_no_fuso_pedido():
+    response = _client().get(
+        "/api/v5/metrics",
+        params={"metric": "ZONE", "zone_id": "vaga-12", "granularity": "15m", "profile": "HOUR_OF_DAY",
+                "timezone": "America/Sao_Paulo", **PERIOD},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["profile"]["peak_bucket"] == 11

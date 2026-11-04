@@ -9,6 +9,9 @@ EV_SERVICO_FIELDS = ("captured_at", "session_id", "sequence")
 # ods.session.started e ods.p6.replay.state usam EV-SINAL sem artifact_version. source_id
 # não é exigido: P6 reproduz várias fontes ao mesmo tempo, listadas no payload (sources).
 EV_SINAL_SESSION_FIELDS = ("captured_at", "session_id", "sequence")
+# ods.s2.entity: EV-SINAL com source_id = fonte principal; artifact_version não é exigido
+# porque a entidade fundida não vem de um artefato de modelo.
+EV_SINAL_ENTITY_FIELDS = ("captured_at", "source_id", "session_id", "sequence")
 
 
 def parse_utc_timestamp(value: object, field_name: str) -> datetime:

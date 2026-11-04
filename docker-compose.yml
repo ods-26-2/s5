@@ -2,6 +2,11 @@
 # compartilhado, então subir o serviço não deve ligá-lo a ele sem que alguém peça.
 #   S5_KAFKA_BROKERS=<host:porta> docker compose up -d --build
 # Sem a variável, o S5 sobe com o barramento em memória.
+#
+# Artefatos fixados na build (ZONES, CALIBRATION): a pasta S5_ARTIFACTS_DIR do host (padrão
+# ./artifacts) aparece no contêiner, só para leitura, em /artifacts. S5_ARTIFACTS lista os
+# descritores pelo caminho dentro do contêiner, por exemplo:
+#   S5_ARTIFACTS=/artifacts/zones-a8-2.descriptor.json,/artifacts/cal-cam0-3.descriptor.json
 services:
   s5-metrics:
     build: .
@@ -10,10 +15,13 @@ services:
     environment:
       S5_KAFKA_BROKERS: ${S5_KAFKA_BROKERS:-}
       S5_KAFKA_GROUP_ID: ${S5_KAFKA_GROUP_ID:-S5-metricas}
+      S5_ARTIFACTS: ${S5_ARTIFACTS:-}
+      S5_ARTIFACT_REGISTRY_DIR: ${S5_ARTIFACT_REGISTRY_DIR:-/artifacts}
     ports:
       - "8000:8000"
     volumes:
       - s5_data:/data
+      - ${S5_ARTIFACTS_DIR:-./artifacts}:/artifacts:ro
     restart: unless-stopped
 
 volumes:

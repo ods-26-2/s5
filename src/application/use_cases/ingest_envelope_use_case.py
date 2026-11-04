@@ -3,6 +3,7 @@ from dataclasses import dataclass
 
 from src.application.parsers.envelope_parser import (
     EV_SERVICO_FIELDS,
+    EV_SINAL_ENTITY_FIELDS,
     EV_SINAL_FIELDS,
     EV_SINAL_SESSION_FIELDS,
     parse_envelope,
@@ -27,6 +28,8 @@ ZONE_TRANSITION_SCHEMA = "ods.s1.zone_transition"
 ZONE_OCCUPANCY_SCHEMA = "ods.s1.zone_occupancy"
 POSITION_SCHEMA = "ods.s1.position"
 QUALIFIED_EVENT_SCHEMA = "ods.s2.event"
+ENTITY_SCHEMA = "ods.s2.entity"
+FUSED_SOURCE_ID = "S2"
 SESSION_STARTED_SCHEMA = "ods.session.started"
 REPLAY_STATE_SCHEMA = "ods.p6.replay.state"
 SUPPORTED_MAJOR_VERSION = 1
@@ -60,6 +63,7 @@ class IngestEnvelopeUseCase:
             ZONE_OCCUPANCY_SCHEMA: self._parse_zone_occupancy,
             POSITION_SCHEMA: self._parse_position,
             QUALIFIED_EVENT_SCHEMA: self._parse_qualified_event,
+            ENTITY_SCHEMA: self._parse_entities,
             SESSION_STARTED_SCHEMA: self._parse_session_started,
             REPLAY_STATE_SCHEMA: self._parse_replay_state,
         }
@@ -68,6 +72,7 @@ class IngestEnvelopeUseCase:
             ZONE_OCCUPANCY_SCHEMA: EV_SINAL_FIELDS,
             POSITION_SCHEMA: EV_SINAL_FIELDS,
             QUALIFIED_EVENT_SCHEMA: EV_SERVICO_FIELDS,
+            ENTITY_SCHEMA: EV_SINAL_ENTITY_FIELDS,
             SESSION_STARTED_SCHEMA: EV_SINAL_SESSION_FIELDS,
             REPLAY_STATE_SCHEMA: EV_SINAL_SESSION_FIELDS,
         }
@@ -149,6 +154,30 @@ class IngestEnvelopeUseCase:
                     space_id=item.get("space_id"),
                 )
                 for item in payload["positions"]
+            ),
+        )
+
+    @staticmethod
+    def _parse_entities(envelope: Envelope) -> PositionSample:
+        """Entidades fundidas por S2. Ficam com a fonte fixa "S2" para que o rastro de uma
+        entidade não se misture com o de uma câmera; o envelope não traz frame_index."""
+        payload = envelope.payload
+        return PositionSample(
+            source_id=FUSED_SOURCE_ID,
+            session_id=envelope.session_id,
+            observed_at=envelope.captured_at,
+            frame_index=0,
+            fused=True,
+            positions=tuple(
+                TrackPosition(
+                    track_id=item["entity_id"],
+                    object_class=item["class"],
+                    point_px=_pair(item["point_px"], "point_px") if "point_px" in item else None,
+                    zone_ids=tuple(item["zone_ids"]),
+                    position_m=_pair(item["position_m"], "position_m") if "position_m" in item else None,
+                    space_id=item.get("space_id"),
+                )
+                for item in payload["entities"]
             ),
         )
 

@@ -120,3 +120,22 @@ def test_s5_nao_sobe_se_um_artefato_da_build_nao_confere_com_o_hash(tmp_path):
             InMemoryB3EventConsumer(), InMemoryB3EventConsumer(), DuckDBTimeSeriesRepository(":memory:"),
             initial_artifacts=read_descriptor_files([tmp_path / "zones-a8-2.descriptor.json"]),
         )
+
+
+def test_reply_com_perfil_de_pico_segue_o_contrato_1_1():
+    bus = InMemoryB3EventConsumer()
+    build_s5(bus, bus, DuckDBTimeSeriesRepository(":memory:"), on_contract_violation=_fail)
+    replies = []
+    bus.subscribe("ods.s5.metrics.reply", replies.append)
+    bus.start()
+    query = metrics_query()
+    query["payload"].update(metric="EVENT", profile="DAY_OF_WEEK", timezone="America/Sao_Paulo")
+    del query["payload"]["zone_id"]
+
+    bus.publish("ods.s5.metrics.query", query)
+
+    [reply] = replies
+    assert reply["schema_version"] == "1.1"
+    assert reply["payload"]["profile"] == {
+        "by": "DAY_OF_WEEK", "timezone": "America/Sao_Paulo", "peak_bucket": None, "buckets": [],
+    }

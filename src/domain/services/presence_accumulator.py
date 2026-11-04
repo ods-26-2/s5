@@ -41,17 +41,30 @@ class PresenceAccumulator:
     """Soma, por célula fina e minuto, os segundos em que cada rastro esteve em cada lugar.
 
     O intervalo entre duas posições consecutivas do mesmo rastro é atribuído à célula da
-    primeira: é onde o objeto estava durante aquele tempo. Câmeras diferentes acumulam
-    separadamente, então uma pessoa vista por duas câmeras calibradas no mesmo espaço
-    conta em dobro; a fusão entre câmeras é de S2 (ods.s2.entity).
+    primeira: é onde o objeto estava durante aquele tempo.
+
+    Câmeras diferentes acumulam separadamente, então uma pessoa vista por duas câmeras
+    calibradas no mesmo espaço contaria em dobro. Para evitar isso, a partir da primeira
+    entidade fundida de S2 (ods.s2.entity) com posição em metros em um espaço, a presença
+    nesse espaço vem só das entidades e as posições em metros de cada câmera (S1) deixam
+    de contar ali, até o fim da sessão. A presença em pixels continua vindo do S1, porque é
+    por câmera e não se sobrepõe.
     """
 
     def __init__(self) -> None:
         self._last_seen: dict[tuple[str, str, str], _LastSeen] = {}
         self._seconds: dict[PresenceKey, float] = {}
+        self._fused_spaces: dict[str, set[str]] = {}
 
     def observe(self, sample: PositionSample) -> None:
+        fused_spaces = self._fused_spaces.setdefault(sample.session_id, set())
         for position in sample.positions:
+            if sample.fused:
+                if position.position_m is None:
+                    continue
+                fused_spaces.add(position.space_id)
+            elif position.position_m is not None and position.space_id in fused_spaces:
+                continue
             track_key = (sample.session_id, sample.source_id, position.track_id)
             previous = self._last_seen.get(track_key)
             if previous is not None:
@@ -63,6 +76,7 @@ class PresenceAccumulator:
     def forget_tracks(self, session_id: str) -> None:
         """Esquece os rastros de uma sessão encerrada, mantendo o que já foi acumulado."""
         self._last_seen = {k: v for k, v in self._last_seen.items() if k[0] != session_id}
+        self._fused_spaces.pop(session_id, None)
 
     def drain(self, session_id: str | None, until: datetime) -> dict[PresenceKey, float]:
         """Entrega e remove os minutos fechados: todos os de sessões que não são a

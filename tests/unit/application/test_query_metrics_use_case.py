@@ -114,3 +114,50 @@ def test_zona_do_artefato_sem_metricas_ainda_nao_e_desconhecida_e_serie_traz_spa
 
     series = use_case.execute(metrics_query()["payload"])["series"]
     assert {item["space_id"] for item in series} == {"patio-1"}
+
+
+def test_perfil_por_hora_do_dia_no_fuso_pedido():
+    payload = metrics_query()["payload"]
+    payload.update(profile="HOUR_OF_DAY", timezone="America/Sao_Paulo")
+
+    reply = QueryMetricsUseCase(_repository()).execute(payload)
+
+    profile = reply["profile"]
+    assert len(reply["series"]) == 2
+    assert profile["by"] == "HOUR_OF_DAY" and profile["timezone"] == "America/Sao_Paulo"
+    # As janelas de 00h e 01h UTC de 22/9 são 21h e 22h de 21/9 em São Paulo.
+    assert [b["bucket"] for b in profile["buckets"]] == [21, 22]
+    assert profile["buckets"][0] == {
+        "bucket": 21, "windows": 1, "total_count": 3, "occupancy_peak": 1, "occupancy_avg": 0.72,
+    }
+    assert profile["peak_bucket"] == 21
+
+
+def test_perfil_de_eventos_por_dia_da_semana_em_utc_por_padrao():
+    payload = metrics_query()["payload"]
+    payload.update(metric="EVENT", profile="DAY_OF_WEEK")
+    del payload["zone_id"]
+
+    profile = QueryMetricsUseCase(_repository()).execute(payload)["profile"]
+
+    assert profile["timezone"] == "UTC"
+    assert profile["buckets"] == [{"bucket": 2, "windows": 1, "count": 4, "uncertain_count": 1}]
+    assert profile["peak_bucket"] == 2
+
+
+def test_sem_profile_a_reply_e_a_da_versao_1_0():
+    assert set(QueryMetricsUseCase(_repository()).execute(metrics_query()["payload"])) == {"series"}
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        {"profile": "HOUR_OF_WEEK"},
+        {"profile": "HOUR_OF_DAY", "granularity": "1d", "period_end_at": "2026-12-01T00:00:00.000Z"},
+        {"profile": "DAY_OF_WEEK", "timezone": "Lua/Base_Alfa"},
+    ],
+)
+def test_perfil_invalido_e_recusado(change):
+    payload = metrics_query()["payload"]
+    payload.update(change)
+    assert _rejected_code(payload) == "INVALID_QUERY"
