@@ -44,6 +44,8 @@ def create_metrics_query_router(
         zone_id: str | None = None,
         event_type: str | None = None,
         object_class: str | None = Query(default=None, alias="class"),
+        profile: str | None = None,
+        timezone: str | None = None,
     ) -> JSONResponse:
         return _respond(
             query_metrics.execute,
@@ -54,6 +56,8 @@ def create_metrics_query_router(
                 granularity=granularity,
                 zone_id=zone_id,
                 event_type=event_type,
+                profile=profile,
+                timezone=timezone,
                 **{"class": object_class},
             ),
         )

@@ -65,7 +65,7 @@ Conforme definido em [`docs/responsability.md`](../docs/responsability.md):
 
 | Submódulo | Funcionalidade | Padrão / Arquitetura | Responsável |
 | :--- | :--- | :--- | :--- |
-| **S5.1 — Ingestor de Eventos B3** | Consumo Pub/Sub do B3, leitura do envelope comum, deduplicação por `message_id` e conversão de `ods.s1.zone_transition`, `ods.s1.zone_occupancy`, `ods.s1.position`, `ods.s2.event`, `ods.session.started` e `ods.p6.replay.state`; reinício do estado a cada sessão. | Event Consumer + Deduplicator | Rafael Castro |
+| **S5.1 — Ingestor de Eventos B3** | Consumo Pub/Sub do B3, leitura do envelope comum, deduplicação por `message_id` e conversão de `ods.s1.zone_transition`, `ods.s1.zone_occupancy`, `ods.s1.position`, `ods.s2.event`, `ods.s2.entity`, `ods.session.started` e `ods.p6.replay.state`; reinício do estado a cada sessão. | Event Consumer + Deduplicator | Rafael Castro |
 | **S5.2 — Motor de Agregação** | Métricas por zona (permanência, pico e média de ocupação, entradas) e por tipo de evento em janelas alinhadas de 1m, 15m, 1h e 1d, publicadas em `ods.s5.zone_metrics` e `ods.s5.event_metrics`. | Time Window Engine + Aggregator Strategy | Rafael Castro |
 | **S5.3 — Mapa de Calor e Consultas** | Segundos de presença por célula a partir de `ods.s1.position`; respostas a `ods.s5.metrics.query` e `ods.s5.heatmap.query`. | Presence Accumulator + Request/Reply | Rafael Castro |
 | **S5.4 — Time-Series Store (DuckDB)** | Armazenamento colunar das métricas e da presença, separado por modo LIVE/REPLAY, e consultas SQL de séries temporais. | DuckDB Repository | Rafael Castro |
@@ -76,7 +76,7 @@ Conforme definido em [`docs/responsability.md`](../docs/responsability.md):
 
 ```text
 Barramento B3 (ods.s1.zone_transition, ods.s1.zone_occupancy, ods.s1.position,
-              ods.s2.event, ods.session.started, ods.p6.replay.state)
+              ods.s2.event, ods.s2.entity, ods.session.started, ods.p6.replay.state)
   └─> subscribe_s5(consumer, handler) — um tópico por schema        (S5.1)
         └─> HandleBusMessageUseCase.execute(message)
               IngestEnvelopeUseCase → Envelope + objeto de domínio do schema
@@ -124,7 +124,7 @@ Barramento B3 (ods.s1.zone_transition, ods.s1.zone_occupancy, ods.s1.position,
 ```
 
 **Processamento** (`IngestEnvelopeUseCase`):
-- Schema fora de `ods.s1.zone_transition`, `ods.s1.zone_occupancy`, `ods.s1.position`, `ods.s2.event`, `ods.session.started` e `ods.p6.replay.state` → `UnsupportedSchemaError`.
+- Schema fora de `ods.s1.zone_transition`, `ods.s1.zone_occupancy`, `ods.s1.position`, `ods.s2.event`, `ods.s2.entity`, `ods.session.started` e `ods.p6.replay.state` → `UnsupportedSchemaError`.
 - `parse_envelope` exige os seis campos fixos e os do perfil do schema: EV-SINAL nas mensagens do S1 (`captured_at`, `source_id`, `session_id`, `sequence`, `artifact_version`) e EV-SERVIÇO no `ods.s2.event` (`captured_at`, `session_id`, `sequence`). `ods.session.started` e `ods.p6.replay.state` usam EV-SINAL sem `artifact_version`; `source_id` não é exigido neles porque P6 reproduz várias fontes, listadas em `sources`. Marcos de tempo precisam de fuso (`Z`) e são convertidos para UTC sem `tzinfo`, convenção de todo o S5. Campo ausente ou com formato inválido → `MalformedEventEnvelopeError`.
 - `MessageDeduplicator` descarta mensagens cujo `message_id` já foi aceito (regra 7) e retorna `None`. O id só é registrado depois que a mensagem é aceita.
 - `schema_version` com MAJOR diferente de `1` → `UnsupportedSchemaVersionError`; qualquer MINOR do MAJOR 1 é aceito (regra 8).
@@ -206,7 +206,7 @@ Cada granularidade é calculada direto dos dados brutos do buffer, sem rollup de
 - Intervalos acima de 1 s são descartados: houve perda de quadros, e o objeto pode não ter ficado ali.
 - A presença é somada por espaço (`space_id` em metros, ou `source_id` em pixels), classe, célula fina (**0,1 m** ou **10 px**) e minuto UTC.
 - Os minutos fechados são gravados na tabela `presence_cells` a cada disparo do `MetricsWindowWorker`, com o `mode` da sessão.
-- Câmeras diferentes acumulam separadamente. Uma pessoa vista por duas câmeras calibradas no mesmo espaço conta em dobro; a fusão entre câmeras é do S2.
+- Câmeras diferentes acumulam separadamente, então uma pessoa vista por duas câmeras calibradas no mesmo espaço contaria em dobro. Quando o S2 publica entidades fundidas (`ods.s2.entity`) com posição em metros em um espaço, a presença nesse espaço passa a vir só delas, e as posições em metros de cada câmera deixam de contar ali até o fim da sessão. A presença em pixels continua vindo do S1, porque é por câmera.
 
 ### `ods.s5.heatmap.query`
 
@@ -231,6 +231,7 @@ Consulta com `space_id` + `cell_size_m`, ou `source_id` + `cell_size_px` em inst
 ```
 
 - `metric` `ZONE` devolve itens no formato de `ods.s5.zone_metrics`; `EVENT` devolve no formato de `ods.s5.event_metrics`, filtrando por `event_type`, `zone_id` e `class`, todos opcionais.
+- **Horário de pico** (versão 1.1, campos opcionais): com `profile` em `HOUR_OF_DAY`, `DAY_OF_WEEK` ou `DAY_OF_MONTH`, a reply traz também `profile`, com os totais da série por hora do dia (0–23), dia da semana (1 = segunda … 7 = domingo) ou dia do mês (1–31) e o `peak_bucket`, o de maior movimento (`null` sem atividade). `timezone` é um fuso IANA, como `America/Sao_Paulo`, com UTC como padrão: a mesma janela pode cair em outro dia no fuso local. `HOUR_OF_DAY` exige granularidade de até 1h. A reply sai com `schema_version` `1.1`.
 - Em `ZONE`, `class` é aceito mas não restringe a série. As métricas por zona somam as classes que a zona conta, definidas no artefato ZONES, e os itens saem sem o campo `class`.
 - A série vem em ordem cronológica, com no máximo 1000 pontos. Período com mais de 1000 janelas da granularidade pedida → `PERIOD_TOO_LONG`.
 - Zona sem nenhuma métrica gravada → `UNKNOWN_ZONE`. Campo ausente ou inválido → `INVALID_QUERY`.
@@ -299,7 +300,15 @@ pip install -r requirements-dev.txt
 S5_KAFKA_BROKERS=<host:porta> docker compose up -d --build
 ```
 
-O endereço do broker não tem valor padrão de propósito: sem `S5_KAFKA_BROKERS`, o S5 sobe com o barramento em memória. A imagem foi testada em amd64; a execução na Jetson (arm64) ainda não foi verificada.
+O endereço do broker não tem valor padrão de propósito: sem `S5_KAFKA_BROKERS`, o S5 sobe com o barramento em memória. Para os artefatos, a pasta `S5_ARTIFACTS_DIR` do host (padrão `./artifacts`) aparece no contêiner em `/artifacts`, só para leitura, e `S5_ARTIFACTS` lista os descritores pelo caminho dentro do contêiner:
+
+```bash
+S5_ARTIFACTS_DIR=./tests/fixtures/artifacts \
+S5_ARTIFACTS=/artifacts/zones-a8-2.descriptor.json,/artifacts/cal-cam0-3.descriptor.json \
+docker compose up -d --build
+```
+
+ A imagem foi testada em amd64; a execução na Jetson (arm64) ainda não foi verificada.
 
 ### Testes
 
@@ -350,7 +359,7 @@ curl "http://localhost:8000/api/v5/heatmap?space_id=patio-1&cell_size_m=0.5&$P"
 
 | Verificação | Resultado |
 | :--- | :--- |
-| `pytest` (unitários, integração e contrato) | 280 aprovados; 1 teste de broker real roda à parte |
+| `pytest` (unitários, integração e contrato) | 306 aprovados; 1 teste de broker real roda à parte |
 | Artefatos | ZONES e CALIBRATION carregados na partida e por `ods.artifact.published`/`ods.i3.calibration`, com conferência de hash e recusa de caminhos fora do diretório |
 | Kafka | Leitura, publicação e consulta contra Kafka 3.9 local em Docker, inclusive com o serviço rodando e janela fechada pelo relógio real. Ainda não testado no broker compartilhado do projeto |
 | Invariantes de domínio | Janelas invertidas, IDs vazios, contagens negativas, enums fora do contrato, coordenadas não finitas, envelopes fora do contrato e `EXIT` sem `dwell_s` lançam exceções específicas de `DomainError` |
@@ -359,6 +368,6 @@ curl "http://localhost:8000/api/v5/heatmap?space_id=patio-1&cell_size_m=0.5&$P"
 | Sessão e replay | Reinício do estado por `ods.session.started`, relógio de captura em replay, pausa, `LOOP` com nova sessão e separação LIVE/REPLAY no DuckDB |
 | Consultas | `ods.s5.metrics.query` e `ods.s5.heatmap.query` com os exemplos da especificação, códigos de erro, reply RPL e ciclo completo pelo barramento em memória |
 | Persistência DuckDB | Séries por zona e por tipo de evento, presença por célula, separação LIVE/REPLAY, expurgo por prazo e migração de bancos antigos |
-| Contratos | 34 exemplos válidos e inválidos dos 6 contratos do S5; tudo o que o S5 publica passa pelo validador, inclusive replies de erro |
+| Contratos | 39 exemplos válidos e inválidos dos 6 contratos do S5 (consulta e reply de métricas na 1.1); tudo o que o S5 publica passa pelo validador, inclusive replies de erro |
 | API HTTP | Rotas `/api/v5/metrics` e `/api/v5/heatmap` testadas via `TestClient` e com `uvicorn` sobre os dados do `seed.py` |
 | Composição | S5 montado por `build_s5` ingere, publica e responde a consultas pelo barramento em memória |

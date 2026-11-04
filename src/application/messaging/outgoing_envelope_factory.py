@@ -4,6 +4,8 @@ from datetime import datetime, timezone
 
 PRODUCER = "S5"
 SCHEMA_VERSION = "1.0"
+# Contratos que já passaram para uma versão MINOR nova (regra 8: só campos opcionais).
+SCHEMA_VERSIONS = {"ods.s5.metrics.reply": "1.1"}
 
 
 def format_utc(instant: datetime) -> str:
@@ -49,7 +51,7 @@ class OutgoingEnvelopeFactory:
             "message_type": "event",
             "message_id": self._id_factory(),
             "schema": schema,
-            "schema_version": SCHEMA_VERSION,
+            "schema_version": SCHEMA_VERSIONS.get(schema, SCHEMA_VERSION),
             "producer": PRODUCER,
             "published_at": format_utc(self._clock()),
             "captured_at": format_utc(captured_at),
@@ -72,7 +74,7 @@ class OutgoingEnvelopeFactory:
             "message_type": "reply",
             "message_id": self._id_factory(),
             "schema": schema,
-            "schema_version": SCHEMA_VERSION,
+            "schema_version": SCHEMA_VERSIONS.get(schema, SCHEMA_VERSION),
             "producer": PRODUCER,
             "published_at": format_utc(self._clock()),
             "correlation_id": correlation_id,

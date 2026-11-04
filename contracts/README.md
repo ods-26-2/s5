@@ -34,6 +34,11 @@ O S5 as verifica no código:
 
 Segue a regra 8 da seção 2. Campo novo entra como opcional e sobe o MINOR (`1.0` → `1.1`); renomear, remover ou mudar o tipo de um campo sobe o MAJOR. O consumidor aceita qualquer MINOR do MAJOR que conhece. Estes schemas descrevem a versão 1.0 e recusam campos que ela não tem; ao publicar uma 1.1, o arquivo do contrato é atualizado no mesmo commit.
 
+## Versões
+
+Todos os contratos estão na 1.0, exceto `ods.s5.metrics.query` e `ods.s5.metrics.reply`, na **1.1**: a consulta ganhou `profile` e `timezone`, e a reply, `profile`, com o perfil de atividade (horário de pico). Os campos são opcionais, então quem usa a 1.0 continua funcionando (regra 8). O S5 publica `ods.s5.metrics.reply` com `schema_version` `1.1`.
+
 ## Divergências da Especificação 1.0
 
+- `profile` e `timezone` em `ods.s5.metrics.query` não estão na especificação; o S5 é dono do payload (seção 6), e a mudança é compatível.
 - `GRID_TOO_LARGE` em `ods.s5.heatmap.reply` não está na lista de erros da especificação. Foi proposto ao TRA-1 para a 1.1, enquanto não há onde guardar o arquivo de `heatmap_uri`.

@@ -96,3 +96,13 @@ def test_api_reconhece_as_zonas_do_artefato_do_servico():
     assert response.status_code == 200
     assert response.json() == {"status": "OK", "series": []}
 
+
+def test_api_devolve_o_perfil_de_pico_no_fuso_pedido():
+    response = _client().get(
+        "/api/v5/metrics",
+        params={"metric": "ZONE", "zone_id": "vaga-12", "granularity": "15m", "profile": "HOUR_OF_DAY",
+                "timezone": "America/Sao_Paulo", **PERIOD},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["profile"]["peak_bucket"] == 11
