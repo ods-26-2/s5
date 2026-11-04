@@ -106,6 +106,36 @@ _POSITION = {
     },
 }
 
+_ENTITY = {
+    "message_type": "event",
+    "message_id": "93a4b5c6-d7e8-4253-8e6f-8091a2b3c4d5",
+    "schema": "ods.s2.entity",
+    "schema_version": "1.0",
+    "producer": "S2",
+    "published_at": "2026-09-23T14:30:00.200Z",
+    "captured_at": "2026-09-23T14:29:59.870Z",
+    "source_id": "cam0",
+    "session_id": SESSION_ID,
+    "sequence": 9120,
+    "payload": {
+        "entities": [
+            {
+                "entity_id": "e-7a21",
+                "class": "person",
+                "position_m": [3.42, 7.10],
+                "space_id": "patio-1",
+                "zone_ids": ["vaga-12"],
+                "source_ids": ["cam0", "cam1"],
+                "track_refs": [
+                    {"source_id": "cam0", "track_id": "t-0391"},
+                    {"source_id": "cam1", "track_id": "t-0112"},
+                ],
+                "ppe": [{"equipment_item": "luva", "compliance": "ABSENT", "confidence": 0.76}],
+            }
+        ]
+    },
+}
+
 _METRICS_QUERY = {
     "message_type": "query",
     "message_id": "71829304-b5c6-4031-8c4d-6e7f8091a2b3",
@@ -224,3 +254,7 @@ def metrics_query() -> dict:
 
 def heatmap_query() -> dict:
     return copy.deepcopy(_HEATMAP_QUERY)
+
+
+def entity() -> dict:
+    return copy.deepcopy(_ENTITY)

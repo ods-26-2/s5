@@ -16,6 +16,7 @@ from src.domain.exceptions import (
 )
 from src.domain.services.message_deduplicator import MessageDeduplicator
 from tests.fixtures.spec_examples import (
+    entity,
     position,
     qualified_event,
     replay_session_started,
@@ -189,5 +190,24 @@ def test_deve_aceitar_position_sem_calibracao():
 def test_deve_rejeitar_point_px_que_nao_seja_par_numerico():
     message = position()
     message["payload"]["positions"][0]["point_px"] = [505]
+    with pytest.raises(MalformedEventEnvelopeError):
+        _use_case().execute(message)
+
+
+def test_deve_converter_s2_entity_do_exemplo_em_posicoes_fundidas():
+    message = _use_case().execute(entity()).message
+
+    assert isinstance(message, PositionSample)
+    assert message.fused is True
+    assert message.source_id == "S2"
+    [track] = message.positions
+    assert track.track_id == "e-7a21"
+    assert track.position_m == (3.42, 7.10)
+    assert track.point_px is None
+
+
+def test_deve_rejeitar_s2_entity_sem_entities():
+    message = entity()
+    del message["payload"]["entities"]
     with pytest.raises(MalformedEventEnvelopeError):
         _use_case().execute(message)
