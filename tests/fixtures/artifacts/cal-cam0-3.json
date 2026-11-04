@@ -1,0 +1,42 @@
+{
+  "valid_from": "2026-09-20T09:00:00.000Z",
+  "image_width": 1920,
+  "image_height": 1080,
+  "intrinsics": {
+    "fx": 1456.2,
+    "fy": 1458.9,
+    "cx": 962.4,
+    "cy": 541.7
+  },
+  "distortion": [
+    -0.312,
+    0.108,
+    0.0004,
+    -0.0002,
+    -0.017
+  ],
+  "homography_px_to_m": [
+    [
+      0.0123,
+      -0.0008,
+      -11.2
+    ],
+    [
+      0.0001,
+      0.0349,
+      -3.9
+    ],
+    [
+      2e-05,
+      0.0011,
+      1.0
+    ]
+  ],
+  "reference_frame": {
+    "space_id": "patio-1",
+    "origin": "canto sudoeste do pátio",
+    "axes": "x ao longo da fileira de vagas"
+  },
+  "reprojection_rms_cm": 4.2,
+  "holdout_points": 12
+}

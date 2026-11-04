@@ -47,7 +47,10 @@ def test_consulta_recusada_vira_reply_de_erro():
 
     assert reply["payload"] == {
         "status": "ERROR",
-        "error": {"code": "UNKNOWN_ZONE", "message": "Zona sem métricas no S5: 'vaga-12'."},
+        "error": {
+            "code": "UNKNOWN_ZONE",
+            "message": "Zona desconhecida: 'vaga-12' não está no artefato ZONES nem tem métricas no S5.",
+        },
     }
 
 

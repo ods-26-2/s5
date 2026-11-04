@@ -1,0 +1,10 @@
+{
+  "artifact_id": "zones-a8",
+  "artifact_version": "zones-a8-2",
+  "kind": "ZONES",
+  "owner": "A8",
+  "uri": "zones-a8-2.json",
+  "hash_sha256": "d941d297244e1c229dc3cee0c59e3d9e24b48f70db5f41d811d42bbd1fd30d09",
+  "valid_from": "2026-09-20T09:00:00.000Z",
+  "schema_version": "1.0"
+}

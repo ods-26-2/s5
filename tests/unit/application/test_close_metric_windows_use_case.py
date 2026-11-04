@@ -1,14 +1,18 @@
+import json
 from datetime import datetime, timedelta
+from pathlib import Path
 
 from src.application.messaging.outgoing_envelope_factory import OutgoingEnvelopeFactory
+from src.application.parsers.artifact_parser import parse_zones
+from src.application.ports.event_publisher import IEventPublisher
+from src.application.state.artifact_catalog import ArtifactCatalog
 from src.application.state.metrics_buffer import MetricsBuffer
 from src.application.use_cases.close_metric_windows_use_case import CloseMetricWindowsUseCase
 from src.application.use_cases.ingest_envelope_use_case import IngestEnvelopeUseCase
-from src.application.ports.event_publisher import IEventPublisher
+from src.domain.entities.session_start import REPLAY
 from src.domain.services.aggregation_strategy import ZoneOccupancyAggregationStrategy
 from src.domain.services.event_metrics_aggregation import EventMetricsAggregation
 from src.domain.services.message_deduplicator import MessageDeduplicator
-from src.domain.entities.session_start import REPLAY
 from tests.fixtures.spec_examples import (
     position,
     REPLAY_SESSION_ID,
@@ -226,3 +230,39 @@ def test_em_replay_nao_ha_limite_de_recuperacao():
     use_case.execute(WALL_CLOCK)
 
     assert len(_payloads(publisher, "ods.s5.zone_metrics")) == 121
+
+
+def _catalog_with_a8_zones():
+    content = json.loads((Path(__file__).resolve().parents[2] / "fixtures/artifacts/zones-a8-2.json").read_text())
+    catalog = ArtifactCatalog()
+    catalog.put_zones(parse_zones(content, "zones-a8", "zones-a8-2"))
+    return catalog
+
+
+def test_publica_toda_zona_do_artefato_mesmo_sem_movimento_e_com_space_id():
+    buffer = MetricsBuffer()
+    ingest = IngestEnvelopeUseCase(MessageDeduplicator())
+    buffer.add(ingest.execute(zone_transition_exit()))
+    publisher = RecordingPublisher()
+    use_case = CloseMetricWindowsUseCase(
+        buffer, ZoneOccupancyAggregationStrategy(), EventMetricsAggregation(), FakeTimeSeriesRepository(),
+        publisher, OutgoingEnvelopeFactory(), granularities=("1m",), catalog=_catalog_with_a8_zones(),
+    )
+
+    use_case.execute(datetime(2026, 9, 23, 14, 30, 3))
+
+    by_zone = {m["payload"]["zone_id"]: m for t, m in publisher.published if t == "ods.s5.zone_metrics"}
+    assert sorted(by_zone) == ["vaga-12", "vaga-13"]
+    assert by_zone["vaga-13"]["payload"]["space_id"] == "patio-1"
+    assert by_zone["vaga-13"]["payload"]["total_count"] == 0
+    assert by_zone["vaga-13"]["artifact_version"] == "zones-a8-2"
+    assert "source_id" not in by_zone["vaga-13"]  # o artefato cobre duas câmeras
+    assert by_zone["vaga-12"]["source_id"] == "cam0"  # vem da mensagem do S1
+
+
+def test_zona_vista_no_s1_e_fora_do_artefato_continua_sendo_publicada():
+    use_case, _, publisher = _setup()
+
+    use_case.execute(datetime(2026, 9, 23, 14, 30, 3))
+
+    assert [m["payload"]["zone_id"] for t, m in publisher.published if t == "ods.s5.zone_metrics"] == ["vaga-12"]

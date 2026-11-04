@@ -2,6 +2,7 @@ from datetime import timedelta
 
 from src.application.messaging.metric_payloads import event_metrics_payload, zone_metrics_payload
 from src.application.parsers.envelope_parser import parse_utc_timestamp
+from src.application.state.artifact_catalog import ArtifactCatalog
 from src.domain.exceptions import DomainError, MalformedEventEnvelopeError, QueryRejectedError
 from src.domain.repositories.i_time_series_repository import ITimeSeriesRepository
 from src.domain.value_objects.granularity import GRANULARITY_SECONDS
@@ -35,8 +36,9 @@ class QueryMetricsUseCase:
     em ZONE mas não restringe a série, e os itens saem sem o campo class.
     """
 
-    def __init__(self, repository: ITimeSeriesRepository) -> None:
+    def __init__(self, repository: ITimeSeriesRepository, catalog: ArtifactCatalog | None = None) -> None:
         self._repository = repository
+        self._catalog = catalog or ArtifactCatalog()
 
     def execute(self, payload: dict) -> dict:
         metric = payload.get("metric")
@@ -59,10 +61,13 @@ class QueryMetricsUseCase:
         if metric == "ZONE":
             if payload.get("event_type") is not None:
                 raise QueryRejectedError(INVALID_QUERY, "event_type só vale em metric EVENT.")
-            if zone_id is not None and not self._repository.zone_exists(zone_id):
-                raise QueryRejectedError(UNKNOWN_ZONE, f"Zona sem métricas no S5: {zone_id!r}.")
+            entries = self._catalog.zone_entries()
+            if zone_id is not None and zone_id not in entries and not self._repository.zone_exists(zone_id):
+                raise QueryRejectedError(
+                    UNKNOWN_ZONE, f"Zona desconhecida: {zone_id!r} não está no artefato ZONES nem tem métricas no S5."
+                )
             series = [
-                zone_metrics_payload(m, granularity)
+                zone_metrics_payload(m, granularity, entries[m.zone_id].space_id if m.zone_id in entries else None)
                 for m in self._repository.query_zone_series(period, granularity, zone_id)
             ]
         else:

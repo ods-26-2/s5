@@ -4,6 +4,7 @@ from datetime import datetime, timedelta
 from src.application.messaging.metric_payloads import event_metrics_payload, zone_metrics_payload
 from src.application.messaging.outgoing_envelope_factory import OutgoingEnvelopeFactory
 from src.application.ports.event_publisher import IEventPublisher
+from src.application.state.artifact_catalog import ArtifactCatalog
 from src.application.state.metrics_buffer import MetricsBuffer
 from src.domain.entities.session_start import REPLAY
 from src.domain.repositories.i_time_series_repository import ITimeSeriesRepository
@@ -50,6 +51,7 @@ class CloseMetricWindowsUseCase:
         granularities: tuple[str, ...] = DEFAULT_GRANULARITIES,
         grace_seconds: float = DEFAULT_GRACE_SECONDS,
         max_catchup_seconds: float = DEFAULT_MAX_CATCHUP_SECONDS,
+        catalog: ArtifactCatalog | None = None,
     ) -> None:
         self._buffer = buffer
         self._zone_aggregation = zone_aggregation
@@ -60,6 +62,7 @@ class CloseMetricWindowsUseCase:
         self._granularities = granularities
         self._grace = timedelta(seconds=grace_seconds)
         self._max_catchup = timedelta(seconds=max_catchup_seconds)
+        self._catalog = catalog or ArtifactCatalog()
         self._cursor_session_id: str | None = None
         self._closed_until: datetime | None = None
 
@@ -106,7 +109,7 @@ class CloseMetricWindowsUseCase:
         self, granularity: str, window: TimeWindow, session_id: str, mode: str
     ) -> list[dict]:
         messages = []
-        for zone_id, context in sorted(self._buffer.zones.items()):
+        for zone_id, source_id, artifact_version, space_id in self._zones_to_close():
             metric = self._zone_aggregation.aggregate(
                 self._buffer.transitions, self._buffer.samples, zone_id, window
             )
@@ -116,14 +119,31 @@ class CloseMetricWindowsUseCase:
             messages.append(
                 self._publish(
                     ZONE_METRICS_SCHEMA,
-                    zone_metrics_payload(metric, granularity),
+                    zone_metrics_payload(metric, granularity, space_id),
                     window.end_time,
                     session_id,
-                    source_id=context.source_id,
-                    artifact_version=context.artifact_version,
+                    source_id=source_id,
+                    artifact_version=artifact_version,
                 )
             )
         return messages
+
+    def _zones_to_close(self) -> list[tuple[str, str | None, str | None, str | None]]:
+        """Toda zona do artefato ZONES vigente, mesmo sem movimento na janela, mais as zonas
+        vistas em mensagens do S1 que nenhum artefato carregado define.
+
+        Para a câmera e a versão do artefato, valem as das mensagens do S1, porque foi com
+        elas que o S1 decidiu as transições; sem mensagens, valem as do artefato.
+        """
+        entries = self._catalog.zone_entries()
+        seen = dict(self._buffer.zones)
+        zones = []
+        for zone_id in sorted(entries.keys() | seen.keys()):
+            entry, context = entries.get(zone_id), seen.get(zone_id)
+            source_id = context.source_id if context else entry.artifact.single_source_id
+            version = context.artifact_version if context else entry.artifact.artifact_version
+            zones.append((zone_id, source_id, version, entry.space_id if entry else None))
+        return zones
 
     def _close_event_window(
         self, granularity: str, window: TimeWindow, session_id: str, mode: str

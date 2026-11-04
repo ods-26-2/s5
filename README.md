@@ -40,6 +40,7 @@ s5/
 │   │   ├── ports/              # IEventPublisher (publicação no B3)
 │   │   └── state/              # MetricsBuffer (mensagens das janelas abertas e sessão)
 │   ├── infrastructure/         # 3. Adaptadores e integrações externas
+│   │   ├── artifacts/          # Leitura de artefatos (ZONES, CALIBRATION) do disco
 │   │   ├── b3_bus/             # Barramento B3: Kafka, em memória e assinaturas do S5
 │   │   ├── contracts/          # ContractValidator e ValidatingPublisher
 │   │   ├── database/           # DuckDBTimeSeriesRepository
@@ -48,7 +49,7 @@ s5/
 │   │   └── http/               # Router FastAPI de depuração (/api/v5)
 │   └── composition.py          # Monta o S5 completo sobre um barramento e um repositório
 └── tests/
-    ├── fixtures/               # Mensagens de exemplo da Especificação 1.0
+    ├── fixtures/               # Mensagens e artefatos de exemplo da Especificação 1.0
     ├── contract/               # Exemplos de contracts/ contra os schemas
     ├── unit/                   # Domínio e casos de uso (com fakes em memória)
     └── integration/            # DuckDB real, HTTP (TestClient), B3 in-memory, composição
@@ -132,6 +133,13 @@ Não há debounce nem histerese no S5: na 6c, a histerese é do S1, configurada 
 
 **Saída:** `IngestedMessage` com o envelope e um `ZoneTransition`, `ZoneOccupancySample`, `PositionSample`, `QualifiedEvent`, `SessionStart` ou `ReplayState`, ou `None` quando a mensagem é repetida. `subscribe_s5` assina um tópico por schema; uma mensagem fora do contrato é registrada em log e descartada, sem interromper as seguintes.
 
+**Artefatos** (`ArtifactCatalog`, Especificação 1.0, seção 8): o S5 usa dois.
+
+- **ZONES**, da aplicação: define as zonas. O S5 publica `ods.s5.zone_metrics` de toda zona do artefato, mesmo sem movimento na janela, com o `space_id` quando as zonas estão em metros. `UNKNOWN_ZONE` só é respondido para zona que não está no artefato nem tem métricas gravadas.
+- **CALIBRATION**, de I3: diz a qual plano (`space_id`) cada câmera pertence. O S5 não aplica a homografia, porque o S1 já entrega as posições em metros.
+
+Os artefatos fixados na build são carregados na partida, a partir dos arquivos com o descritor comum listados em `S5_ARTIFACTS`. Versões novas chegam por `ods.artifact.published`, que traz o descritor, e por `ods.i3.calibration`, que traz a calibração no payload. O conteúdo é buscado pela `uri` do descritor e conferido pelo `hash_sha256`; um artefato da build que não confere impede o S5 de subir. Enquanto o registro de B5 não tem formato definido, `FileArtifactSource` lê do disco: `registry://` aponta para `S5_ARTIFACT_REGISTRY_DIR`, e uma `uri` sem esquema é relativa ao arquivo do descritor. Artefatos de outros tipos (RULES, ROUTING…) são ignorados.
+
 **Sessões** (`MetricsBuffer`): a camada 3 reinicia o estado a cada `ods.session.started` (Especificação 1.0, seção 7).
 - Uma sessão nova descarta as transições, amostras e eventos da anterior. Mensagens atrasadas da sessão encerrada, ou da `previous_session_id` anunciada, são ignoradas.
 - Os tópicos são independentes, então mensagens do S1 e do S2 podem chegar antes do anúncio da sessão. Nesse caso a sessão é adotada como `LIVE`, com início no primeiro `captured_at` recebido. O anúncio, quando chega, só completa o modo e o início, sem descartar o que já foi recebido.
@@ -155,7 +163,7 @@ Sem posição salva, o grupo Kafka começa em `latest`: o S5 acompanha o present
 
 **Relógio:** em sessão `LIVE`, o relógio é o de parede. Em `REPLAY`, é o maior `captured_at` recebido na sessão: o tempo de captura reproduzido é o da gravação, que não acompanha a parede e volta em `SEEK` e `LOOP`. P6 publica `ods.p6.replay.state` a cada 1 s em reprodução, o que mantém esse relógio andando mesmo quando nenhuma zona muda. Com o replay pausado, nenhuma janela fecha.
 
-**Métricas por zona** (`ZoneOccupancyAggregationStrategy`), em janelas semiabertas `[início, fim)`, para cada zona já vista em mensagens do S1:
+**Métricas por zona** (`ZoneOccupancyAggregationStrategy`), em janelas semiabertas `[início, fim)`, para cada zona do artefato ZONES vigente e cada zona vista em mensagens do S1 que nenhum artefato define:
 - **Dwell time médio:** média do `dwell_s` das transições `EXIT` na janela.
 - **Contagem total:** número de transições `ENTER` na janela.
 - **Pico de ocupação:** maior `count` vigente na janela.
@@ -313,7 +321,7 @@ Os testes unitários usam fakes em memória ([`tests/unit/application/fakes.py`]
 
 ### Subindo a API
 
-O ponto de entrada é [`app.py`](app.py). Ele monta o S5 completo por `build_s5` ([`composition.py`](src/composition.py)) sobre o barramento em memória e um `DuckDBTimeSeriesRepository`, fecha as janelas a cada `S5_TICK_SECONDS` (padrão 5), roda o expurgo de retenção a cada `S5_PURGE_SECONDS` (padrão 3600) e expõe a API de depuração. O barramento é escolhido por `S5_KAFKA_BROKERS`: com o endereço do broker, usa o Kafka; sem ele, usa o barramento em memória, e mensagens só chegam de dentro do processo. `S5_KAFKA_GROUP_ID` (padrão `S5-metricas`) e `S5_KAFKA_OFFSET_RESET` (padrão `latest`) ajustam o consumidor. O banco padrão é `s5_metrics.db`; para usar outro caminho (ou `:memory:`), defina `S5_DATABASE_PATH`.
+O ponto de entrada é [`app.py`](app.py). Ele monta o S5 completo por `build_s5` ([`composition.py`](src/composition.py)) sobre o barramento em memória e um `DuckDBTimeSeriesRepository`, fecha as janelas a cada `S5_TICK_SECONDS` (padrão 5), roda o expurgo de retenção a cada `S5_PURGE_SECONDS` (padrão 3600) e expõe a API de depuração. O barramento é escolhido por `S5_KAFKA_BROKERS`: com o endereço do broker, usa o Kafka; sem ele, usa o barramento em memória, e mensagens só chegam de dentro do processo. `S5_KAFKA_GROUP_ID` (padrão `S5-metricas`) e `S5_KAFKA_OFFSET_RESET` (padrão `latest`) ajustam o consumidor. Os artefatos fixados na build vêm de `S5_ARTIFACTS` (descritores separados por vírgula) e, para URIs `registry://`, de `S5_ARTIFACT_REGISTRY_DIR`. Exemplo com os artefatos de teste: `S5_ARTIFACTS=tests/fixtures/artifacts/zones-a8-2.descriptor.json,tests/fixtures/artifacts/cal-cam0-3.descriptor.json`. O banco padrão é `s5_metrics.db`; para usar outro caminho (ou `:memory:`), defina `S5_DATABASE_PATH`.
 
 ```bash
 uvicorn app:app --reload                                    # barramento em memória
@@ -342,7 +350,8 @@ curl "http://localhost:8000/api/v5/heatmap?space_id=patio-1&cell_size_m=0.5&$P"
 
 | Verificação | Resultado |
 | :--- | :--- |
-| `pytest` (unitários, integração e contrato) | 242 aprovados; 1 teste de broker real roda à parte |
+| `pytest` (unitários, integração e contrato) | 280 aprovados; 1 teste de broker real roda à parte |
+| Artefatos | ZONES e CALIBRATION carregados na partida e por `ods.artifact.published`/`ods.i3.calibration`, com conferência de hash e recusa de caminhos fora do diretório |
 | Kafka | Leitura, publicação e consulta contra Kafka 3.9 local em Docker, inclusive com o serviço rodando e janela fechada pelo relógio real. Ainda não testado no broker compartilhado do projeto |
 | Invariantes de domínio | Janelas invertidas, IDs vazios, contagens negativas, enums fora do contrato, coordenadas não finitas, envelopes fora do contrato e `EXIT` sem `dwell_s` lançam exceções específicas de `DomainError` |
 | Contrato de entrada | Exemplos de `ods.s1.zone_transition`, `ods.s1.zone_occupancy`, `ods.s1.position`, `ods.s2.event`, `ods.session.started` e `ods.p6.replay.state` da Especificação 1.0, deduplicação por `message_id` e regra de MAJOR.MINOR |

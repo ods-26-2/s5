@@ -12,10 +12,14 @@ def _window_fields(window: TimeWindow, granularity: str) -> dict:
     }
 
 
-def zone_metrics_payload(metric: OccupancyMetric, granularity: str) -> dict:
-    """Payload de ods.s5.zone_metrics; é também o item da série de ods.s5.metrics.query."""
+def zone_metrics_payload(metric: OccupancyMetric, granularity: str, space_id: str | None = None) -> dict:
+    """Payload de ods.s5.zone_metrics; é também o item da série de ods.s5.metrics.query.
+    space_id vem do artefato ZONES quando a zona é métrica."""
+    payload = {"zone_id": metric.zone_id}
+    if space_id is not None:
+        payload["space_id"] = space_id
     return {
-        "zone_id": metric.zone_id,
+        **payload,
         **_window_fields(metric.window, granularity),
         "total_count": metric.total_count,
         "occupancy_peak": metric.occupancy_peak,

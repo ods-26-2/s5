@@ -8,6 +8,10 @@ Com S5_KAFKA_BROKERS definido, o barramento é o Kafka nesse endereço. Sem ele,
 em memória, e mensagens só chegam de dentro do processo. Outras variáveis: S5_KAFKA_GROUP_ID
 e S5_KAFKA_OFFSET_RESET.
 
+Artefatos fixados na build: S5_ARTIFACTS lista, separados por vírgula, os arquivos com o
+descritor comum (seção 8) de cada ZONES e CALIBRATION. S5_ARTIFACT_REGISTRY_DIR é o diretório
+para URIs registry://, enquanto o registro de B5 não tem formato definido.
+
 Uso: uvicorn app:app --reload
 """
 
@@ -16,10 +20,12 @@ import logging
 import os
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
+from pathlib import Path
 
 from fastapi import FastAPI
 
 from src.composition import build_s5
+from src.infrastructure.artifacts.file_artifact_source import FileArtifactSource, read_descriptor_files
 from src.infrastructure.b3_bus.b3_event_consumer import InMemoryB3EventConsumer
 from src.infrastructure.b3_bus.kafka_b3_bus import DEFAULT_GROUP_ID, DEFAULT_OFFSET_RESET, KafkaB3Bus
 from src.infrastructure.database.duckdb_time_series_repository import DuckDBTimeSeriesRepository
@@ -39,7 +45,16 @@ bus = (
     if kafka_brokers
     else InMemoryB3EventConsumer()
 )
-service = build_s5(bus, bus, repository)
+registry_dir = os.getenv("S5_ARTIFACT_REGISTRY_DIR", "").strip()
+artifact_files = [Path(p.strip()) for p in os.getenv("S5_ARTIFACTS", "").split(",") if p.strip()]
+service = build_s5(
+    bus,
+    bus,
+    repository,
+    artifact_source=FileArtifactSource(Path(registry_dir) if registry_dir else None),
+    initial_artifacts=read_descriptor_files(artifact_files),
+)
+logger.info("Artefatos carregados na partida: %s", service.catalog.versions() or "nenhum")
 tick_seconds = float(os.getenv("S5_TICK_SECONDS", "5"))
 purge_seconds = float(os.getenv("S5_PURGE_SECONDS", "3600"))
 

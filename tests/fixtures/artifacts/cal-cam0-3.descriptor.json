@@ -1,0 +1,10 @@
+{
+  "artifact_id": "cal-cam0",
+  "artifact_version": "cal-cam0-3",
+  "kind": "CALIBRATION",
+  "owner": "I3",
+  "uri": "cal-cam0-3.json",
+  "hash_sha256": "54f2b78eac6d0a8fcb9001e25ddf5e726c062c9823adb5edb9ce784c796c1994",
+  "valid_from": "2026-09-20T09:00:00.000Z",
+  "schema_version": "1.0"
+}
