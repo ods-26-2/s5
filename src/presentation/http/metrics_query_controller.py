@@ -1,6 +1,7 @@
 from fastapi import APIRouter, Query
 from fastapi.responses import JSONResponse
 
+from src.application.state.artifact_catalog import ArtifactCatalog
 from src.application.use_cases.query_heatmap_use_case import QueryHeatmapUseCase
 from src.application.use_cases.query_metrics_use_case import UNKNOWN_ZONE, QueryMetricsUseCase
 from src.domain.exceptions import QueryRejectedError
@@ -21,14 +22,17 @@ def _respond(run, payload: dict) -> JSONResponse:
         return JSONResponse(body, status_code=status_code)
 
 
-def create_metrics_query_router(repository: ITimeSeriesRepository) -> APIRouter:
+def create_metrics_query_router(
+    repository: ITimeSeriesRepository, catalog: ArtifactCatalog | None = None
+) -> APIRouter:
     """API REST de depuração. As aplicações consultam o S5 pelo barramento
     (ods.s5.metrics.query e ods.s5.heatmap.query); estas rotas executam os mesmos casos
     de uso, com os mesmos parâmetros, formato de resposta e códigos de erro, para
-    inspecionar o banco durante o desenvolvimento."""
+    inspecionar o banco durante o desenvolvimento. `catalog` é o mesmo do serviço, para
+    que as zonas do artefato ZONES valham aqui como valem no barramento."""
 
     router = APIRouter(prefix="/api/v5")
-    query_metrics = QueryMetricsUseCase(repository)
+    query_metrics = QueryMetricsUseCase(repository, catalog)
     query_heatmap = QueryHeatmapUseCase(repository)
 
     @router.get("/metrics")

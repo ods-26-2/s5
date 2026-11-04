@@ -92,4 +92,4 @@ async def lifespan(_: FastAPI):
 
 
 app = FastAPI(title="S5 — Métricas e Séries Temporais", lifespan=lifespan)
-app.include_router(create_metrics_query_router(repository))
+app.include_router(create_metrics_query_router(repository, service.catalog))
