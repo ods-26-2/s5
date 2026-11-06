@@ -353,6 +353,22 @@ curl "http://localhost:8000/api/v5/metrics?metric=EVENT&granularity=1h&$P"
 curl "http://localhost:8000/api/v5/heatmap?space_id=patio-1&cell_size_m=0.5&$P"
 ```
 
+### Demonstração local de ponta a ponta
+
+[`scripts/demo_local.sh`](scripts/demo_local.sh) roda tudo na máquina, sem tocar em nenhum broker compartilhado. Ele sobe um Kafka local e o S5 em Docker com os artefatos de exemplo e chama [`scripts/demo_publish.py`](scripts/demo_publish.py). Esse script publica uma sessão LIVE com o horário atual:
+
+- o `ods.session.started`;
+- transições e ocupação de `vaga-12` e `vaga-13`;
+- 25 posições de uma pessoa atravessando `patio-1`;
+- um `DWELL_EXCEEDED` do S2.
+
+Depois ele espera a janela de 1 minuto fechar e mostra as `ods.s5.zone_metrics` e `ods.s5.event_metrics` publicadas. Por fim faz duas consultas pelo barramento: a série da `vaga-12` com o horário de pico no fuso de São Paulo e o mapa de calor do pátio. Ao terminar, ou com Ctrl+C, desliga os dois contêineres. Leva cerca de 1 a 2 minutos e precisa das portas 9092 e 8000 livres.
+
+```bash
+source .venv/bin/activate
+bash scripts/demo_local.sh
+```
+
 ---
 
 ## ✅ Validação
