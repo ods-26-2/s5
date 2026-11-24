@@ -17,6 +17,9 @@ services:
       S5_KAFKA_GROUP_ID: ${S5_KAFKA_GROUP_ID:-S5-metricas}
       S5_ARTIFACTS: ${S5_ARTIFACTS:-}
       S5_ARTIFACT_REGISTRY_DIR: ${S5_ARTIFACT_REGISTRY_DIR:-/artifacts}
+    # Teto de recursos, para o S5 não tomar a VM inteira. Parado, ele usa uns 70 MiB.
+    mem_limit: ${S5_MEM_LIMIT:-512m}
+    cpus: ${S5_CPUS:-1.0}
     ports:
       - "8000:8000"
     volumes:
