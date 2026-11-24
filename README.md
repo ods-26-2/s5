@@ -308,7 +308,50 @@ S5_ARTIFACTS=/artifacts/zones-a8-2.descriptor.json,/artifacts/cal-cam0-3.descrip
 docker compose up -d --build
 ```
 
- A imagem foi testada em amd64; a execução na Jetson (arm64) ainda não foi verificada.
+A imagem foi testada em amd64 e em arm64 emulado (QEMU): a build para `linux/arm64` passa e a demonstração local roda de ponta a ponta. Falta verificar na própria Jetson, que mostra também o desempenho real.
+
+#### Na Jetson
+
+O mais simples é fazer a build na própria Jetson, que já é arm64:
+
+```bash
+git clone <repo> && cd s5
+S5_KAFKA_BROKERS=<host:porta> \
+S5_ARTIFACTS=/artifacts/<zones>.descriptor.json,/artifacts/<cal>.descriptor.json \
+docker compose up -d --build
+```
+
+Sem internet na Jetson, gere a imagem em outra máquina e copie:
+
+```bash
+docker buildx build --platform linux/arm64 --load -t ods/s5-metrics:0.1.0 .
+docker save ods/s5-metrics:0.1.0 | gzip | ssh <usuario>@<jetson> 'gunzip | docker load'
+# na Jetson, com o repositório (ou só docker-compose.yml e a pasta artifacts/):
+S5_KAFKA_BROKERS=<host:porta> docker compose up -d
+```
+
+A build em amd64 precisa da emulação registrada uma vez por boot: `docker run --privileged --rm tonistiigi/binfmt --install arm64`.
+
+#### Na GCP
+
+O S5 roda em uma VM própria no projeto da turma e consome do broker da Jetson. Medido com a demonstração: ~50 MiB de memória, CPU abaixo de 6 % de um núcleo, imagem de 323 MB. Por isso a VM padrão é uma `e2-small` (2 vCPU compartilhadas, 2 GB) com 20 GB de disco, e o compose limita o contêiner a 512 MiB e 1 CPU (`S5_MEM_LIMIT`, `S5_CPUS`).
+
+Os scripts em [`scripts/gcp/`](scripts/gcp) marcam tudo com o rótulo `componente=s5`, para não se misturar com os recursos dos colegas:
+
+```bash
+# 1. VM com Docker e Ops Agent, firewall só para a API e agenda que liga às 8 h (seg–sex)
+#    e desliga às 22 h, no fuso de São Paulo
+GCP_PROJECT=<projeto> S5_ALLOWED_CIDR=<seu-ip>/32 bash scripts/gcp/criar_vm.sh
+# 2. Alertas por e-mail de CPU > 80 %, memória > 85 % e disco > 80 %
+GCP_PROJECT=<projeto> S5_ALERT_EMAIL=<email> bash scripts/gcp/criar_alertas.sh
+# 3. Na VM: clonar o repositório e subir o S5 como na seção Docker, com S5_KAFKA_BROKERS
+#    apontando para o broker da Jetson
+# 4. Na VM: estatísticas de uso em CSV, uma amostra por minuto, e o resumo
+nohup bash scripts/gcp/coletar_estatisticas.sh ~/s5-uso.csv 60 >/dev/null 2>&1 &
+python3 scripts/gcp/resumir_estatisticas.py ~/s5-uso.csv
+```
+
+A agenda de liga/desliga só funciona se a conta de serviço do Compute Engine (`service-<número-do-projeto>@compute-system.iam.gserviceaccount.com`) tiver o papel `roles/compute.instanceAdmin.v1`. Sem a agenda, desligue à mão com `gcloud compute instances stop s5-metrics --zone <zona>`. O orçamento com alerta de gastos (Billing → Budgets) exige permissão na conta de faturamento, que no projeto da turma normalmente é do professor.
 
 ### Testes
 
@@ -351,6 +394,22 @@ P="period_start_at=2026-10-09T14:00:00.000Z&period_end_at=2026-10-09T15:00:00.00
 curl "http://localhost:8000/api/v5/metrics?metric=ZONE&zone_id=vaga-12&granularity=15m&$P"
 curl "http://localhost:8000/api/v5/metrics?metric=EVENT&granularity=1h&$P"
 curl "http://localhost:8000/api/v5/heatmap?space_id=patio-1&cell_size_m=0.5&$P"
+```
+
+### Demonstração local de ponta a ponta
+
+[`scripts/demo_local.sh`](scripts/demo_local.sh) roda tudo na máquina, sem tocar em nenhum broker compartilhado. Ele sobe um Kafka local e o S5 em Docker com os artefatos de exemplo e chama [`scripts/demo_publish.py`](scripts/demo_publish.py). Esse script publica uma sessão LIVE com o horário atual:
+
+- o `ods.session.started`;
+- transições e ocupação de `vaga-12` e `vaga-13`;
+- 25 posições de uma pessoa atravessando `patio-1`;
+- um `DWELL_EXCEEDED` do S2.
+
+Depois ele espera a janela de 1 minuto fechar e mostra as `ods.s5.zone_metrics` e `ods.s5.event_metrics` publicadas. Por fim faz duas consultas pelo barramento: a série da `vaga-12` com o horário de pico no fuso de São Paulo e o mapa de calor do pátio. Ao terminar, ou com Ctrl+C, desliga os dois contêineres. Leva cerca de 1 a 2 minutos e precisa das portas 9092 e 8000 livres.
+
+```bash
+source .venv/bin/activate
+bash scripts/demo_local.sh
 ```
 
 ---
